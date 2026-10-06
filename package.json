@@ -1,0 +1,133 @@
+{
+  "name": "wzoi-helper",
+  "displayName": "wzoi-helper",
+  "description": "WZOI 题目辅助工具",
+  "version": "0.0.1",
+  "engines": {
+    "vscode": "^1.103.0"
+  },
+  "categories": [
+    "Other"
+  ],
+  "activationEvents": [],
+  "main": "./out/extension.js",
+  "contributes": {
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "wzoi",
+          "title": "WZOI",
+          "icon": "resources/wzoi.svg"
+        }
+      ]
+    },
+    "views": {
+      "wzoi": [
+        {
+          "id": "wzoiProblems",
+          "name": "题目",
+          "icon": "$(list-unordered)"
+        }
+      ]
+    },
+    "commands": [
+      {
+        "command": "wzoi-helper.helloWorld",
+        "title": "Hello World"
+      },
+      {
+        "command": "wzoi-helper.fetchProblem",
+        "title": "WZOI: 抓取题目"
+      },
+      {
+        "command": "wzoi-helper.refreshProblems",
+        "title": "WZOI: 刷新题库",
+        "icon": "$(refresh)"
+      },
+      {
+        "command": "wzoi-helper.openProblem",
+        "title": "WZOI: 打开题目"
+      },
+      {
+        "command": "wzoi-helper.loginPassword",
+        "title": "WZOI: 登录（用户名密码）"
+      },
+      {
+        "command": "wzoi-helper.logout",
+        "title": "WZOI: 退出登录"
+      },
+      {
+        "command": "wzoi-helper.submitToProblem",
+        "title": "WZOI: 提交代码到此题",
+        "icon": "$(cloud-upload)"
+      }
+    ],
+    "menus": {
+      "view/title": [
+        {
+          "command": "wzoi-helper.refreshProblems",
+          "when": "view == wzoiProblems",
+          "group": "navigation"
+        },
+        {
+          "command": "wzoi-helper.loginPassword",
+          "when": "view == wzoiProblems",
+          "group": "1_auth"
+        },
+        {
+          "command": "wzoi-helper.logout",
+          "when": "view == wzoiProblems",
+          "group": "1_auth"
+        }
+      ],
+      "view/item/context": [
+        {
+          "command": "wzoi-helper.submitToProblem",
+          "when": "view == wzoiProblems && viewItem == problem",
+          "group": "inline"
+        }
+      ]
+    },
+    "configuration": {
+      "title": "WZOI",
+      "properties": {
+        "wzoi.problemsets": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": [
+            "1"
+          ],
+          "description": "要显示的题库 ID 列表，例如 [\"1\", \"1450\", \"2117\"]"
+        }
+      }
+    }
+  },
+  "scripts": {
+    "vscode:prepublish": "npm run compile",
+    "compile": "tsc -p ./",
+    "watch": "tsc -watch -p ./",
+    "pretest": "npm run compile && npm run lint",
+    "lint": "eslint src",
+    "test": "vscode-test"
+  },
+  "devDependencies": {
+    "@types/mocha": "^10.0.10",
+    "@types/node": "24.x",
+    "@types/vscode": "^1.103.0",
+    "@vscode/test-cli": "^0.0.15",
+    "@vscode/test-electron": "^3.0.0",
+    "eslint": "^10.5.0",
+    "typescript": "^6.0.3",
+    "typescript-eslint": "^8.61.1"
+  },
+  "overrides": {
+    "diff": "^8.0.4",
+    "serialize-javascript": "^7.0.6"
+  },
+  "dependencies": {
+    "axios": "^1.20.0",
+    "cheerio": "^1.2.0"
+  }
+}
