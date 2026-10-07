@@ -499,3 +499,183 @@ export async function fetchCurrentUsername(
     });
     return username;
 }
+
+/** 翻页抓取自己所有提交记录 */
+export async function fetchAllMySubmissions(
+    username: string,
+    cookie?: string,
+    onProgress?: (page: number, count: number) => void
+): Promise<SubmissionSummary[]> {
+    const all: SubmissionSummary[] = [];
+    let url: string | undefined =
+        `${BASE_URL}/solutions?user_name=${encodeURIComponent(username)}`;
+    let page = 0;
+    while (url && page < 50) {
+        page++;
+        const { data: html } = await axios.get(url, {
+            headers: {
+                'User-Agent': 'VSCode-WZOI-Extension/0.0.1',
+                ...(cookie ? { Cookie: cookie } : {}),
+            },
+            timeout: 15000,
+        });
+        all.push(...parseSubmissionList(html));
+        onProgress?.(page, all.length);
+
+        const $ = cheerio.load(html);
+        const next = $('a[rel="next"]').attr('href');
+        if (!next) break;
+        url = next.startsWith('http') ? next : `${BASE_URL}${next}`;
+        await new Promise((r) => setTimeout(r, 200));
+    }
+    return all;
+}
+
+/** 从提交列表构建「题目名 → 最高分」映射 */
+export function buildScoreIndex(
+    subs: SubmissionSummary[]
+): Map<string, number> {
+    const map = new Map<string, number>();
+    for (const s of subs) {
+        const score = parseFloat(s.score);
+        if (isNaN(score)) continue;
+        const prev = map.get(s.problemTitle) ?? -1;
+        if (score > prev) map.set(s.problemTitle, score);
+    }
+    return map;
+}
+export interface DashboardData {
+    homeworks: { title: string; url: string; current: number; total: number }[];
+    history: {
+        title: string;
+        url: string;
+        problemsetTitle: string;
+        problemsetUrl: string;
+        ac: boolean;
+    }[];
+    contests: { title: string; url: string; startTime: string; endTime: string }[];
+}
+
+export async function fetchDashboard(cookie?: string): Promise<DashboardData> {
+    const { data: html } = await axios.get(`${BASE_URL}/`, {
+        headers: {
+            'User-Agent': 'VSCode-WZOI-Extension/0.0.1',
+            ...(cookie ? { Cookie: cookie } : {}),
+        },
+        timeout: 15000,
+    });
+    const $ = cheerio.load(html);
+
+    const homeworks: DashboardData['homeworks'] = [];
+    const history: DashboardData['history'] = [];
+    const contests: DashboardData['contests'] = [];
+
+    $('.card').each((_, card) => {
+        const header = $(card).find('.card-header').first().text().trim();
+
+        if (header === '作业') {
+            $(card).find('.list-group-item').each((_, li) => {
+                const a = $(li).find('a').first();
+                const title = a.text().trim();
+                const url = a.attr('href') ?? '';
+                const txt = $(li).find('.progress-bar').text().trim();
+                const m = txt.match(/(\d+)\s*\/\s*(\d+)/);
+                if (title) {
+                    homeworks.push({
+                        title,
+                        url,
+                        current: m ? parseInt(m[1], 10) : 0,
+                        total: m ? parseInt(m[2], 10) : 0,
+                    });
+                }
+            });
+        }
+
+        if (header === '浏览历史') {
+            $(card).find('.list-group-item').each((_, li) => {
+                const mainA = $(li).find('.col-10 a').first();
+                const psA = $(li).find('.col-10 small a').first();
+                const title = mainA.text().trim();
+                const url = mainA.attr('href') ?? '';
+                if (title) {
+                    history.push({
+                        title,
+                        url,
+                        problemsetTitle: psA.text().trim(),
+                        problemsetUrl: psA.attr('href') ?? '',
+                        ac: $(li).find('span.fa-check').length > 0,
+                    });
+                }
+            });
+        }
+
+        if (header === '近期比赛') {
+            $(card).find('.list-group-item').each((_, li) => {
+                const a = $(li).find('a').first();
+                const title = a.text().trim();
+                const url = a.attr('href') ?? '';
+                const spans = $(li).find('span');
+                if (title) {
+                    contests.push({
+                        title,
+                        url,
+                        startTime: spans.eq(0).text().trim(),
+                        endTime: spans.eq(1).text().trim(),
+                    });
+                }
+            });
+        }
+    });
+
+    return { homeworks, history, contests };
+}
+export interface TagInfo {
+    id: string;
+    name: string;
+}
+
+export async function fetchTags(): Promise<TagInfo[]> {
+    const { data: html } = await axios.get(`${BASE_URL}/`, {
+        headers: { 'User-Agent': 'VSCode-WZOI-Extension/0.0.1' },
+        timeout: 15000,
+    });
+    const $ = cheerio.load(html);
+    const tags: TagInfo[] = [];
+    $('#tags-select option').each((_, el) => {
+        const id = $(el).attr('value') ?? '';
+        const name = $(el).text().trim();
+        if (id && name) tags.push({ id, name });
+    });
+    return tags;
+}
+
+export async function searchByTag(
+    tagId: string,
+    cookie?: string
+): Promise<ProblemSummary[]> {
+    const url = `${BASE_URL}/search?tags%5B%5D=${tagId}&search_item=problems`;
+    const { data: html } = await axios.get(url, {
+        headers: {
+            'User-Agent': 'VSCode-WZOI-Extension/0.0.1',
+            ...(cookie ? { Cookie: cookie } : {}),
+        },
+        timeout: 15000,
+    });
+    const $ = cheerio.load(html);
+    const list: ProblemSummary[] = [];
+    const seen = new Set<string>();
+    $('td.text-left a[href^="/s/"]').each((_, a) => {
+        const href = $(a).attr('href') ?? '';
+        const m = href.match(/^\/s\/(\d+)\/(\d+)/);
+        if (!m) return;
+        const key = `${m[1]}/${m[2]}`;
+        if (seen.has(key)) return;
+        seen.add(key);
+        list.push({
+            problemsetId: m[1],
+            problemId: m[2],
+            title: $(a).text().trim(),
+        });
+    });
+    return list;
+}

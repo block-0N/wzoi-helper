@@ -78,6 +78,21 @@
       {
         "command": "wzoi-helper.openProblemset",
         "title": "WZOI: 打开比赛"
+      },
+      {
+        "command": "wzoi-helper.syncACStatus",
+        "title": "WZOI: 同步 AC 状态",
+        "icon": "$(sync)"
+      },
+      {
+        "command": "wzoi-helper.openDashboard",
+        "title": "WZOI: 打开首页",
+        "icon": "$(home)"
+      },
+      {
+        "command": "wzoi-helper.searchByTag",
+        "title": "WZOI: 按标签搜索",
+        "icon": "$(tag)"
       }
     ],
     "menus": {
@@ -96,6 +111,21 @@
           "command": "wzoi-helper.logout",
           "when": "view == wzoiProblems",
           "group": "1_auth"
+        },
+        {
+          "command": "wzoi-helper.syncACStatus",
+          "when": "view == wzoiProblems",
+          "group": "navigation"
+        },
+        {
+          "command": "wzoi-helper.openDashboard",
+          "when": "view == wzoiProblems",
+          "group": "navigation"
+        },
+        {
+          "command": "wzoi-helper.searchByTag",
+          "when": "view == wzoiProblems",
+          "group": "navigation"
         }
       ],
       "view/item/context": [
@@ -145,7 +175,9 @@
     "serialize-javascript": "^7.0.6"
   },
   "dependencies": {
+    "@highlightjs/cdn-assets": "^11.12.0",
     "axios": "^1.20.0",
-    "cheerio": "^1.2.0"
+    "cheerio": "^1.2.0",
+    "mathjax-full": "^3.2.1"
   }
 }

@@ -57,9 +57,14 @@ export class ProblemTreeProvider implements vscode.TreeDataProvider<Node> {
 
     private nodes = new Map<string, ProblemsetNode>();
     private treeView?: vscode.TreeView<Node>;
+    private scoreIndex = new Map<string, number>();
 
     constructor(private getCookie: () => Promise<string | undefined>) { }
 
+    setScoreIndex(index: Map<string, number>) {
+        this.scoreIndex = index;
+        this._onDidChangeTreeData.fire(undefined);
+    }
     attachTreeView(tv: vscode.TreeView<Node>) {
         this.treeView = tv;
     }
@@ -181,6 +186,21 @@ export class ProblemTreeProvider implements vscode.TreeDataProvider<Node> {
             return problems.map((p) => {
                 const node = new ProblemNode(p);
                 node.parent = element;
+                const score = this.scoreIndex.get(p.title);
+                if (score != null) {
+                    if (score >= 100) {
+                        node.iconPath = new vscode.ThemeIcon(
+                            'pass-filled',
+                            new vscode.ThemeColor('charts.green')
+                        );
+                    } else if (score > 0) {
+                        node.description = `#${p.problemId} · ${score}分`;
+                        node.iconPath = new vscode.ThemeIcon(
+                            'circle-filled',
+                            new vscode.ThemeColor('charts.yellow')
+                        );
+                    }
+                }
                 return node;
             });
         }

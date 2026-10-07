@@ -3,6 +3,11 @@ import {
     fetchProblem,
     fetchSolution,
     fetchCurrentUsername,
+    fetchAllMySubmissions,
+    buildScoreIndex,
+    fetchDashboard,
+    fetchTags,
+    searchByTag
 } from './api/wzoi';
 import { loginWithPassword } from './api/auth';
 import { submitSolution, guessLanguage, LANGUAGE_OPTIONS } from './api/submit';
@@ -11,7 +16,7 @@ import { SubmissionTreeProvider } from './tree/submissionTree';
 import { ContestTreeProvider } from './tree/contestTree';
 import { ProblemPanel } from './webview/problemPanel';
 import { SolutionPanel } from './webview/solutionPanel';
-
+import { DashboardPanel } from './webview/dashboardPanel';
 export function activate(context: vscode.ExtensionContext) {
     console.log('wzoi-helper is now active!');
 
@@ -22,7 +27,9 @@ export function activate(context: vscode.ExtensionContext) {
     const getUsername = async (): Promise<string | undefined> => {
         return await context.secrets.get('wzoi.username');
     };
-
+    const wzoiOutput = vscode.window.createOutputChannel('WZOI');
+    context.subscriptions.push(wzoiOutput);
+    wzoiOutput.appendLine('WZOI 扩展已激活');
     // ---------- Providers ----------
     const treeProvider = new ProblemTreeProvider(getCookie);
     const treeView = vscode.window.createTreeView('wzoiProblems', {
@@ -64,7 +71,7 @@ export function activate(context: vscode.ExtensionContext) {
                     () => fetchProblem(id, '1', undefined)
                 );
                 // 用 Webview 打开
-                ProblemPanel.createOrShow(context.extensionUri, problem, '1');
+                ProblemPanel.createOrShow(context.extensionUri, problem, '1', wzoiOutput);
                 vscode.window.showInformationMessage(`题目 ${id} 抓取成功`);
             } catch (err) {
                 vscode.window.showErrorMessage(`抓取失败: ${err}`);
@@ -96,7 +103,7 @@ export function activate(context: vscode.ExtensionContext) {
                     },
                     () => fetchProblem(problemId, problemsetId, cookie)
                 );
-                ProblemPanel.createOrShow(context.extensionUri, problem, problemsetId);
+                ProblemPanel.createOrShow(context.extensionUri, problem, problemsetId, wzoiOutput);
             } catch (err) {
                 vscode.window.showErrorMessage(`打开题目失败: ${err}`);
             }
@@ -259,7 +266,7 @@ export function activate(context: vscode.ExtensionContext) {
                     },
                     () => fetchSolution(id, cookie)
                 );
-                SolutionPanel.createOrShow(detail);
+                SolutionPanel.createOrShow(context.extensionUri, detail);
             } catch (err) {
                 vscode.window.showErrorMessage(`加载提交失败: ${err}`);
             }
@@ -285,7 +292,97 @@ export function activate(context: vscode.ExtensionContext) {
             await treeProvider.revealProblemset(problemsetId);
         }
     );
+    const syncACStatus = vscode.commands.registerCommand(
+        'wzoi-helper.syncACStatus',
+        async () => {
+            const username = await getUsername();
+            const cookie = await getCookie();
+            if (!username || !cookie) {
+                vscode.window.showWarningMessage('请先登录');
+                return;
+            }
+            try {
+                const subs = await vscode.window.withProgress(
+                    {
+                        location: vscode.ProgressLocation.Notification,
+                        title: '同步提交记录...',
+                        cancellable: false,
+                    },
+                    () => fetchAllMySubmissions(username, cookie)
+                );
+                const index = buildScoreIndex(subs);
+                treeProvider.setScoreIndex(index);
+                vscode.window.showInformationMessage(
+                    `已同步 ${subs.length} 条提交，覆盖 ${index.size} 道题`
+                );
+            } catch (err) {
+                vscode.window.showErrorMessage(`同步失败: ${err}`);
+            }
+        }
+    );
+    const openDashboard = vscode.commands.registerCommand(
+        'wzoi-helper.openDashboard',
+        async () => {
+            try {
+                const cookie = await getCookie();
+                const data = await vscode.window.withProgress(
+                    {
+                        location: vscode.ProgressLocation.Notification,
+                        title: '加载首页...',
+                    },
+                    () => fetchDashboard(cookie)
+                );
+                DashboardPanel.createOrShow(data);
+            } catch (err) {
+                vscode.window.showErrorMessage(`加载失败: ${err}`);
+            }
+        }
+    );
+    const searchByTagCmd = vscode.commands.registerCommand(
+        'wzoi-helper.searchByTag',
+        async () => {
+            try {
+                const tags = await fetchTags();
+                const pick = await vscode.window.showQuickPick(
+                    tags.map((t) => ({ label: t.name, id: t.id })),
+                    { placeHolder: '选择标签' }
+                );
+                if (!pick) return;
 
+                const cookie = await getCookie();
+                const problems = await vscode.window.withProgress(
+                    {
+                        location: vscode.ProgressLocation.Notification,
+                        title: `搜索标签「${pick.label}」...`,
+                    },
+                    () => searchByTag(pick.id, cookie)
+                );
+
+                if (!problems.length) {
+                    vscode.window.showInformationMessage('没有找到题目');
+                    return;
+                }
+
+                const probPick = await vscode.window.showQuickPick(
+                    problems.map((p) => ({
+                        label: p.title,
+                        description: `#${p.problemId}`,
+                        p,
+                    })),
+                    { placeHolder: `共 ${problems.length} 道题，选择要打开的` }
+                );
+                if (probPick) {
+                    vscode.commands.executeCommand(
+                        'wzoi-helper.openProblem',
+                        probPick.p.problemsetId,
+                        probPick.p.problemId
+                    );
+                }
+            } catch (err) {
+                vscode.window.showErrorMessage(`搜索失败: ${err}`);
+            }
+        }
+    );
     context.subscriptions.push(
         hello,
         fetch,
@@ -298,7 +395,10 @@ export function activate(context: vscode.ExtensionContext) {
         openProblemset,
         treeView,
         submissionView,
-        contestView
+        contestView,
+        syncACStatus,
+        openDashboard,
+        searchByTagCmd
     );
 }
 
