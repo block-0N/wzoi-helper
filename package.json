@@ -2,7 +2,7 @@
   "name": "wzoi-helper",
   "displayName": "wzoi-helper",
   "description": "WZOI 题目辅助工具",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "publisher": "block-0N",
   "repository": {
     "type": "git",
@@ -15,7 +15,6 @@
   "categories": [
     "Other"
   ],
-  "activationEvents": [],
   "main": "./dist/extension.js",
   "contributes": {
     "viewsContainers": {
@@ -99,6 +98,29 @@
         "command": "wzoi-helper.searchByTag",
         "title": "WZOI: 按标签搜索",
         "icon": "$(tag)"
+      },
+      {
+        "command": "wzoi-helper.createWorkspace",
+        "title": "WZOI: 创建代码工作区",
+        "icon": "$(new-folder)"
+      },
+      {
+        "command": "wzoi-helper.runTests",
+        "title": "WZOI: 本地测试",
+        "icon": "$(beaker)"
+      },
+      {
+        "command": "wzoi-helper.search",
+        "title": "WZOI: 搜索",
+        "icon": "$(search)"
+      },
+      {
+        "command": "wzoi-helper.openSubmissions",
+        "title": "WZOI: 搜索提交记录"
+      },
+      {
+        "command": "wzoi-helper.openUserSubmissions",
+        "title": "WZOI: 查看用户提交记录"
       }
     ],
     "menus": {
@@ -132,6 +154,11 @@
           "command": "wzoi-helper.searchByTag",
           "when": "view == wzoiProblems",
           "group": "navigation"
+        },
+        {
+          "command": "wzoi-helper.search",
+          "when": "view == wzoiProblems",
+          "group": "navigation"
         }
       ],
       "view/item/context": [
@@ -139,6 +166,11 @@
           "command": "wzoi-helper.submitToProblem",
           "when": "view == wzoiProblems && viewItem == problem",
           "group": "inline"
+        },
+        {
+          "command": "wzoi-helper.createWorkspace",
+          "when": "view == wzoiProblems && viewItem == problem",
+          "group": "1_workspace"
         }
       ]
     },
@@ -154,6 +186,32 @@
             "1"
           ],
           "description": "要显示的题库 ID 列表，例如 [\"1\", \"1450\", \"2117\"]"
+        },
+        "wzoi.workspaceFolder": {
+          "type": "string",
+          "default": "wzoi",
+          "description": "在工作区根目录下创建题目文件夹的子目录名"
+        },
+        "wzoi.compilerPath": {
+          "type": "string",
+          "default": "g++",
+          "description": "C++ 编译器路径（如不在 PATH 中可填完整路径）"
+        },
+        "wzoi.extraCompileFlags": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": [
+            "-std=c++17",
+            "-O2"
+          ],
+          "description": "编译附加参数"
+        },
+        "wzoi.defaultTimeLimitMs": {
+          "type": "number",
+          "default": 2000,
+          "description": "本地测试默认时间限制（毫秒），未识别到题目限制时使用"
         }
       }
     }

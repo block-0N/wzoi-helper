@@ -147,6 +147,7 @@ export interface ProblemSummary {
     problemsetId: string;
     problemId: string;
     title: string;
+    problemsetTitle?: string;
 }
 
 export interface ProblemsetMeta {
@@ -651,9 +652,217 @@ export async function fetchTags(): Promise<TagInfo[]> {
 
 export async function searchByTag(
     tagId: string,
-    cookie?: string
+    cookie?: string,
+    onProgress?: (page: number, total: number) => void
 ): Promise<ProblemSummary[]> {
-    const url = `${BASE_URL}/search?tags%5B%5D=${tagId}&search_item=problems`;
+    return searchProblems('', [tagId], cookie, onProgress);
+}
+/**
+ * 轮询等待评测完成
+ */
+export async function waitForSolution(
+    id: number,
+    cookie: string | undefined,
+    opts?: {
+        intervalMs?: number;
+        timeoutMs?: number;
+        onProgress?: (status: string) => void;
+        shouldCancel?: () => boolean;
+    }
+): Promise<SolutionDetail> {
+    const intervalMs = opts?.intervalMs ?? 1500;
+    const timeoutMs = opts?.timeoutMs ?? 90000;
+    const start = Date.now();
+    let last: SolutionDetail | undefined;
+
+    while (Date.now() - start < timeoutMs) {
+        if (opts?.shouldCancel?.()) {
+            throw new Error('已取消');
+        }
+        try {
+            last = await fetchSolution(id, cookie);
+            opts?.onProgress?.(last.status || '评测中...');
+            if (last.isFinished) return last;
+        } catch (err) {
+            // 网络抖动忽略，继续轮询
+            console.error('轮询提交状态失败:', err);
+        }
+        await new Promise((r) => setTimeout(r, intervalMs));
+    }
+    if (last) return last;
+    throw new Error('等待评测结果超时');
+}
+export interface UserSummary {
+    uid: string;
+    username: string;
+    nickname: string;
+    avatar: string;
+}
+
+/**
+ * 通用题目搜索：关键词和标签 ID 均可选，但不能都为空。
+ * 会拉取所有分页。
+ */
+export async function searchProblems(
+    keyword: string,
+    tagIds: string[],
+    cookie?: string,
+    onProgress?: (page: number, total: number) => void
+): Promise<ProblemSummary[]> {
+    const all: ProblemSummary[] = [];
+    const seen = new Set<string>();
+    let page = 1;
+    let totalPages = 1;
+
+    while (page <= totalPages) {
+        const params = new URLSearchParams();
+        params.append('name', keyword);
+        for (const t of tagIds) params.append('tags[]', t);
+        params.append('search_item', 'problems');
+        params.append('page', String(page));
+        const url = `${BASE_URL}/search?${params.toString()}`;
+
+        const { data: html } = await axios.get(url, {
+            headers: {
+                'User-Agent': 'VSCode-WZOI-Extension/0.0.1',
+                ...(cookie ? { Cookie: cookie } : {}),
+            },
+            timeout: 15000,
+        });
+
+        const $ = cheerio.load(html);
+
+        $('table.table tbody tr').each((_, tr) => {
+            const tds = $(tr).find('td');
+            if (tds.length < 3) return;
+
+            const problemsetTitle = tds.eq(0).text().trim();
+            const a = tds.eq(1).find('a[href^="/s/"]').first();
+            if (!a.length) return;
+            const href = a.attr('href') ?? '';
+            const m = href.match(/^\/s\/(\d+)\/(\d+)/);
+            if (!m) return;
+            const key = `${m[1]}/${m[2]}`;
+            if (seen.has(key)) return;
+            seen.add(key);
+
+            all.push({
+                problemsetId: m[1],
+                problemId: m[2],
+                title: a.text().trim(),
+                problemsetTitle,
+            });
+        });
+
+        if (page === 1) {
+            $('.pagination .page-link').each((_, el) => {
+                const href = $(el).attr('href') ?? '';
+                const m = href.match(/[?&]page=(\d+)/);
+                if (m) {
+                    const n = parseInt(m[1], 10);
+                    if (n > totalPages) totalPages = n;
+                }
+            });
+        }
+
+        onProgress?.(page, totalPages);
+        page++;
+        if (page <= totalPages) await new Promise((r) => setTimeout(r, 200));
+    }
+
+    return all;
+}
+
+/**
+ * 搜索用户
+ */
+export async function searchUsers(
+    keyword: string,
+    cookie?: string
+): Promise<UserSummary[]> {
+    const params = new URLSearchParams();
+    params.append('name', keyword);
+    params.append('search_item', 'users');
+    const url = `${BASE_URL}/search?${params.toString()}`;
+
+    const { data: html } = await axios.get(url, {
+        headers: {
+            'User-Agent': 'VSCode-WZOI-Extension/0.0.1',
+            ...(cookie ? { Cookie: cookie } : {}),
+        },
+        timeout: 15000,
+    });
+
+    const $ = cheerio.load(html);
+    const all: UserSummary[] = [];
+    const seen = new Set<string>();
+
+    // 每个用户是一个 .card，内含头像链接和 <h6> 用户名
+    $('.card').each((_, card) => {
+        const a = $(card).find('a[href^="/users/"]').first();
+        if (!a.length) return;
+        const href = a.attr('href') ?? '';
+        const m = href.match(/^\/users\/(\d+)/);
+        if (!m) return;
+        const uid = m[1];
+        if (seen.has(uid)) return;
+        seen.add(uid);
+
+        const img = $(card).find('img.card-img').first();
+        const avatar = img.attr('src') || '';
+
+        const nameEl = $(card).find('h6').first();
+        const displayName = nameEl.text().trim();
+
+        all.push({
+            uid,
+            username: displayName,
+            nickname: displayName,
+            avatar,
+        });
+    });
+
+    return all;
+}
+
+export interface UserProfile {
+    uid: string;
+    displayName: string;
+    mainHtml: string;
+}
+
+async function fetchImageAsDataUri(
+    url: string,
+    cookie?: string
+): Promise<string> {
+    if (!url) return '';
+    try {
+        const full = url.startsWith('//')
+            ? `https:${url}`
+            : url.startsWith('/')
+                ? `https://wzoi.cn${url}`
+                : url;
+        const resp = await axios.get(full, {
+            headers: {
+                'User-Agent': 'VSCode-WZOI-Extension/0.0.1',
+                ...(cookie ? { Cookie: cookie } : {}),
+            },
+            responseType: 'arraybuffer',
+            timeout: 10000,
+        });
+        const mime = String(resp.headers['content-type'] || 'image/png');
+        const b64 = Buffer.from(resp.data).toString('base64');
+        return `data:${mime};base64,${b64}`;
+    } catch {
+        return '';
+    }
+}
+
+export async function fetchUserProfile(
+    uid: string,
+    cookie?: string
+): Promise<UserProfile> {
+    const url = `${BASE_URL}/users/${uid}`;
     const { data: html } = await axios.get(url, {
         headers: {
             'User-Agent': 'VSCode-WZOI-Extension/0.0.1',
@@ -662,20 +871,160 @@ export async function searchByTag(
         timeout: 15000,
     });
     const $ = cheerio.load(html);
-    const list: ProblemSummary[] = [];
-    const seen = new Set<string>();
-    $('td.text-left a[href^="/s/"]').each((_, a) => {
-        const href = $(a).attr('href') ?? '';
-        const m = href.match(/^\/s\/(\d+)\/(\d+)/);
-        if (!m) return;
-        const key = `${m[1]}/${m[2]}`;
-        if (seen.has(key)) return;
-        seen.add(key);
-        list.push({
-            problemsetId: m[1],
-            problemId: m[2],
-            title: $(a).text().trim(),
-        });
+
+    const displayName =
+        $('main .card-title').first().text().trim() ||
+        $('main h1').first().text().trim() ||
+        `用户 ${uid}`;
+
+    const mainEl = $('main').clone();
+
+    // 剔除无关内容
+    mainEl.find('script, style, link').remove();
+    mainEl.find('.breadcrumb').remove();
+    mainEl.find('.modal').remove();
+    mainEl.find('#image_upload').remove();
+    mainEl.find('button[data-toggle="modal"]').remove();
+    mainEl.find('button[data-target]').remove();
+    mainEl.find('button[onclick]').remove();
+    mainEl.find('a[href="/password/change"]').remove();
+    mainEl.find('.btn').remove();
+
+    // 特殊处理：提交数 / 通过题目 链接
+    mainEl.find('a[href^="/solutions?user_name="]').each((_, el) => {
+        const $el = $(el);
+        const href = $el.attr('href') || '';
+        const match = href.match(/user_name=([^&]+)/);
+        const userName = match ? decodeURIComponent(match[1]) : '';
+        const isAc = href.includes('score_min=100');
+        $el.attr('data-wzoi-action', 'openSubmissions');
+        $el.attr('data-wzoi-user', userName);
+        $el.attr('data-wzoi-filter', isAc ? 'ac' : 'all');
+        $el.removeAttr('href');
+        $el.attr('href', '#');
     });
-    return list;
+
+    // 内联图片（带 Cookie 下载 → base64）
+    const imgEls = mainEl.find('img').toArray();
+    for (const el of imgEls) {
+        const $el = $(el);
+        const src = $el.attr('src') || '';
+        if (!src) continue;
+        const dataUri = await fetchImageAsDataUri(src, cookie);
+        if (dataUri) {
+            $el.attr('src', dataUri);
+        } else {
+            $el.remove();
+        }
+    }
+
+    // 其余相对链接改绝对路径
+    mainEl.find('a[href]').each((_, el) => {
+        const $el = $(el);
+        const href = $el.attr('href') || '';
+        // 已经特殊处理过的跳过
+        if ($el.attr('data-wzoi-action')) return;
+        if (href.startsWith('/')) {
+            $el.attr('href', `https://wzoi.cn${href}`);
+        }
+    });
+
+    return {
+        uid,
+        displayName,
+        mainHtml: mainEl.html() || '',
+    };
+}
+
+export interface SubmissionListItem {
+    id: number;
+    userDisplay: string;
+    problemTitle: string;
+    score: string;
+    time: string;
+    memory: string;
+    language: string;
+    length: string;
+    submitTime: string;
+}
+
+/**
+ * 抓取某用户的提交列表（支持 AC 筛选），自动翻页
+ */
+export interface SubmissionFilters {
+    userName?: string;
+    problemsetId?: string;
+    problemId?: string;
+    scoreMin?: string;
+    scoreMax?: string;
+    language?: string;
+    status?: string;
+}
+
+export async function fetchUserSubmissions(
+    filters: SubmissionFilters,
+    cookie?: string,
+    onProgress?: (page: number, count: number) => void
+): Promise<SubmissionListItem[]> {
+    const all: SubmissionListItem[] = [];
+    const seen = new Set<number>();
+
+    const params = new URLSearchParams();
+    if (filters.userName) params.append('user_name', filters.userName);
+    if (filters.problemsetId) params.append('problemset_id', filters.problemsetId);
+    if (filters.problemId) params.append('problem_id', filters.problemId);
+    if (filters.scoreMin !== undefined) params.append('score_min', filters.scoreMin);
+    if (filters.scoreMax !== undefined) params.append('score_max', filters.scoreMax);
+    if (filters.language) params.append('language', filters.language);
+    if (filters.status) params.append('status', filters.status);
+
+    let url: string | undefined = `${BASE_URL}/solutions?${params.toString()}`;
+    let page = 0;
+
+    while (url && page < 100) {
+        page++;
+        const { data: html } = await axios.get(url, {
+            headers: {
+                'User-Agent': 'VSCode-WZOI-Extension/0.0.1',
+                ...(cookie ? { Cookie: cookie } : {}),
+            },
+            timeout: 15000,
+        });
+
+        const $ = cheerio.load(html);
+
+        $('#solutions-tbody > tr').each((_, tr) => {
+            const tds = $(tr).find('td');
+            if (tds.length < 9) return;
+
+            const id = parseInt(tds.eq(0).text().trim(), 10);
+            if (!id || seen.has(id)) return;
+            seen.add(id);
+
+            all.push({
+                id,
+                userDisplay:
+                    tds.eq(1).find('a').first().text().trim() ||
+                    tds.eq(1).text().trim(),
+                problemTitle: tds.eq(2).text().trim(),
+                score: tds.eq(3).text().trim(),
+                time: tds.eq(4).text().trim(),
+                memory: tds.eq(5).text().trim(),
+                language: tds.eq(6).text().trim(),
+                length: tds.eq(7).text().trim(),
+                submitTime: tds.eq(8).text().trim(),
+            });
+        });
+
+        onProgress?.(page, all.length);
+
+        // cursor 分页：找 rel="next" 的链接
+        const next = $('a[rel="next"]').attr('href');
+        if (!next) break;
+        url = next.startsWith('http') ? next : `${BASE_URL}${next}`;
+
+        await new Promise((r) => setTimeout(r, 200));
+    }
+
+    return all;
 }
