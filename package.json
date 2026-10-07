@@ -1,8 +1,21 @@
 {
+  "files": [
+    "out",
+    "resources",
+    "package.json",
+    "README.md",
+    "LICENSE"
+  ],
   "name": "wzoi-helper",
   "displayName": "wzoi-helper",
   "description": "WZOI 题目辅助工具",
-  "version": "0.0.1",
+  "version": "1.0.0",
+  "publisher": "block-0N",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/block-0N/wzoi-helper.git"
+  },
+  "license": "MIT",
   "engines": {
     "vscode": "^1.103.0"
   },

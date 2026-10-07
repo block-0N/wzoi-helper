@@ -1,71 +1,109 @@
-# wzoi-helper README
+# WZOI Helper
 
-This is the README for your extension "wzoi-helper". After writing up a brief description, we recommend including the following sections.
+在 VS Code 中浏览、查看和提交[温中 OI](https://wzoi.cn) 题目的扩展。
 
-## Features
+## 功能
 
-Describe specific features of your extension including screenshots of your extension in action. Image paths are relative to this README file.
+- **题库浏览**：侧边栏树状展示题库、分页与题目，支持多个题库
+- **题目查看**：在内置 Webview 中渲染题面，支持 MathJax 公式、样例一键复制
+- **登录**：使用 WZOI 用户名密码登录，凭证保存在 VS Code 加密存储中
+- **提交代码**：从编辑器直接提交当前代码或选中片段到指定题目
+- **提交记录**：侧边栏查看历史提交，支持查看测试点详情和源代码
+- **比赛列表**：展示近期比赛，进行中的高亮显示
+- **AC 状态**：同步自己的提交记录，在题目列表标记通过状态
+- **首页面板**：查看作业进度、浏览历史和近期比赛
+- **标签搜索**：按标签筛选题目
 
-For example if there is an image subfolder under your extension project workspace:
+## 安装
 
-\!\[feature X\]\(images/feature-x.png\)
+### 从 VSIX 安装
 
-> Tip: Many popular extensions utilize animations. This is an excellent way to show off your extension! We recommend short, focused animations that are easy to follow.
+1. 下载 `wzoi-helper-x.x.x.vsix`
+2. 打开 VS Code，`Ctrl+Shift+X` 打开扩展面板
+3. 点击右上角 `...` → **Install from VSIX...**
+4. 选择下载的 `.vsix` 文件
 
-## Requirements
+### 从源码安装
 
-If you have any requirements or dependencies, add a section describing those and how to install and configure them.
+```bash
+git clone https://github.com/block-0N/wzoi-helper.git
+cd wzoi-helper
+npm install
+npm run compile
+```
 
-## Extension Settings
+然后在 VS Code 中打开该目录，按 `F5` 启动扩展开发宿主即可调试。
 
-Include if your extension adds any VS Code settings through the `contributes.configuration` extension point.
+## 使用
 
-For example:
+### 登录
 
-This extension contributes the following settings:
+1. `Ctrl+Shift+P` 打开命令面板
+2. 输入 **WZOI: 登录（用户名密码）**
+3. 输入 WZOI 的用户名和密码
 
-* `myExtension.enable`: Enable/disable this extension.
-* `myExtension.thing`: Set to `blah` to do something.
+登录成功后，需要权限的题库和题目即可访问。凭证保存在 VS Code 的 `SecretStorage` 中，不会写入磁盘明文。
 
-## Known Issues
+### 浏览题目
 
-Calling out known issues can help limit users opening duplicate issues against your extension.
+1. 点击左侧活动栏的 **WZOI** 图标
+2. 展开「题目」面板中的题库
+3. 展开某一页，点击题目即可在编辑器区域打开题面
 
-## Release Notes
+### 提交代码
 
-Users appreciate release notes as you update your extension.
+1. 在编辑器中打开要提交的代码文件
+2. 在侧边栏展开题目，**鼠标悬停在题目上**，点击右侧的上传图标
+3. 选择语言并确认
 
-### 1.0.0
+也可以选中部分代码只提交选中片段。
 
-Initial release of ...
+### 同步 AC 状态
 
-### 1.0.1
+点击「题目」面板标题栏的同步图标，扩展会拉取你的全部提交记录，并在题目列表中标记已通过的题目。
 
-Fixed issue #.
+## 配置
 
-### 1.1.0
+| 配置项 | 类型 | 默认值 | 说明 |
+| --- | --- | --- | --- |
+| `wzoi.problemsets` | `string[]` | `["1"]` | 要在侧边栏显示的题库 ID 列表，例如 `["1", "1450", "2117"]` |
 
-Added features X, Y, and Z.
+## 命令
 
----
+| 命令 | 说明 |
+| --- | --- |
+| `WZOI: 登录（用户名密码）` | 使用用户名密码登录 |
+| `WZOI: 退出登录` | 清除保存的登录凭证 |
+| `WZOI: 刷新题库` | 重新加载所有题库和提交记录 |
+| `WZOI: 同步 AC 状态` | 拉取全部提交记录并标记通过状态 |
+| `WZOI: 打开首页` | 在编辑器区域打开 WZOI 首页面板 |
+| `WZOI: 按标签搜索` | 按标签筛选题目 |
+| `WZOI: 抓取题目` | 输入题目 ID 直接打开题面 |
+| `WZOI: 提交代码到此题` | 提交编辑器中的代码到指定题目 |
+| `WZOI: 查看提交` | 查看某次提交的详情 |
 
-## Following extension guidelines
+## 开发
 
-Ensure that you've read through the extensions guidelines and follow the best practices for creating your extension.
+```bash
+npm install       # 安装依赖
+npm run compile   # 编译
+npm run watch     # 监视模式
+```
 
-* [Extension Guidelines](https://code.visualstudio.com/api/references/extension-guidelines)
+在 VS Code 中按 `F5` 启动扩展开发宿主窗口，在其中测试扩展。
 
-## Working with Markdown
+打包发布：
 
-You can author your README using Visual Studio Code. Here are some useful editor keyboard shortcuts:
+```bash
+npm install -g @vscode/vsce
+vsce package
+```
 
-* Split the editor (`Cmd+\` on macOS or `Ctrl+\` on Windows and Linux).
-* Toggle preview (`Shift+Cmd+V` on macOS or `Shift+Ctrl+V` on Windows and Linux).
-* Press `Ctrl+Space` (Windows, Linux, macOS) to see a list of Markdown snippets.
+## 注意事项
 
-## For more information
+- 请遵守 [wzoi.cn](https://wzoi.cn) 的使用条款，合理使用，不要频繁请求服务器。
+- 本扩展仅用于个人学习和刷题辅助，题目内容版权归温中 OI 所有。
 
-* [Visual Studio Code's Markdown Support](http://code.visualstudio.com/docs/languages/markdown)
-* [Markdown Syntax Reference](https://help.github.com/articles/markdown-basics/)
+## License
 
-**Enjoy!**
+MIT
