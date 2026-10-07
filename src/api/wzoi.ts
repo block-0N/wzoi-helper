@@ -272,3 +272,230 @@ function parseProblemset(problemsetId: string, html: string): ProblemsetMeta {
         problems,
     };
 }
+
+// ============ 提交相关 ============
+
+export interface SubmissionSummary {
+    id: number;
+    userDisplay: string;
+    problemTitle: string;
+    score: string;
+    time: string;
+    memory: string;
+    language: string;
+    length: string;
+    submitTime: string;
+}
+
+export interface SolutionDetail {
+    id: number;
+    userDisplay: string;
+    problemTitle: string;
+    problemUrl: string;
+    score: string;
+    time: string;
+    memory: string;
+    language: string;
+    length: string;
+    status: string;
+    submitTime: string;
+    judgeTime: string;
+    testcases: {
+        id: string;
+        score: string;
+        time: string;
+        memory: string;
+        verdict: string;
+    }[];
+    code: string;
+    codeLanguage: string;
+    isFinished: boolean;
+}
+
+/** 抓自己的提交列表 */
+export async function fetchMySubmissions(
+    username: string,
+    cookie?: string
+): Promise<SubmissionSummary[]> {
+    const url = `${BASE_URL}/solutions?user_name=${encodeURIComponent(username)}`;
+    const { data: html } = await axios.get(url, {
+        headers: {
+            'User-Agent': 'VSCode-WZOI-Extension/0.0.1',
+            ...(cookie ? { Cookie: cookie } : {}),
+        },
+        timeout: 15000,
+    });
+    return parseSubmissionList(html);
+}
+
+function parseSubmissionList(html: string): SubmissionSummary[] {
+    const $ = cheerio.load(html);
+    const list: SubmissionSummary[] = [];
+    $('#solutions-tbody > tr').each((_, tr) => {
+        const tds = $(tr).find('td');
+        if (tds.length < 9) return;
+        const idText = tds.eq(0).text().trim();
+        const id = parseInt(idText, 10);
+        if (!id) return;
+        list.push({
+            id,
+            userDisplay: tds.eq(1).find('a').first().text().trim() || tds.eq(1).text().trim(),
+            problemTitle: tds.eq(2).text().trim(),
+            score: tds.eq(3).text().trim(),
+            time: tds.eq(4).text().trim(),
+            memory: tds.eq(5).text().trim(),
+            language: tds.eq(6).text().trim(),
+            length: tds.eq(7).text().trim(),
+            submitTime: tds.eq(8).text().trim(),
+        });
+    });
+    return list;
+}
+
+/** 抓某个提交详情 */
+export async function fetchSolution(
+    id: number,
+    cookie?: string
+): Promise<SolutionDetail> {
+    const url = `${BASE_URL}/solutions/${id}`;
+    const { data: html } = await axios.get(url, {
+        headers: {
+            'User-Agent': 'VSCode-WZOI-Extension/0.0.1',
+            ...(cookie ? { Cookie: cookie } : {}),
+        },
+        timeout: 15000,
+    });
+    return parseSolutionDetail(id, html);
+}
+
+function parseSolutionDetail(id: number, html: string): SolutionDetail {
+    const $ = cheerio.load(html);
+
+    const info: Record<string, string> = {};
+    // 第一张表：th/td 成对
+    $('table.table').first().find('tr').each((_, tr) => {
+        const ths = $(tr).find('th');
+        const tds = $(tr).find('td');
+        ths.each((i, th) => {
+            const key = $(th).text().trim();
+            const val = tds.eq(i).text().trim();
+            if (key && val) info[key] = val;
+        });
+    });
+
+    const problemAnchor = $('table.table').first().find('a[href^="/s/"]').first();
+    const problemUrl = problemAnchor.attr('href') ?? '';
+    const problemTitle = problemAnchor.text().trim() || info['题目'] || '';
+
+    const testcases: SolutionDetail['testcases'] = [];
+    // 第二张表：测试点
+    $('table.table').eq(1).find('tbody tr').each((_, tr) => {
+        const tds = $(tr).find('td');
+        if (tds.length < 5) return;
+        testcases.push({
+            id: tds.eq(0).text().trim(),
+            score: tds.eq(1).text().trim(),
+            time: tds.eq(2).text().trim(),
+            memory: tds.eq(3).text().trim(),
+            verdict: tds.eq(4).text().trim(),
+        });
+    });
+
+    const codeEl = $('pre.line-numbers code').first();
+    const code = codeEl.text();
+    const codeClass = codeEl.attr('class') ?? '';
+    const codeLanguage = codeClass.replace('language-', '').trim();
+
+    const status = info['状态'] ?? '';
+    const isFinished = status.includes('评测完成') || status.includes('编译错误');
+
+    return {
+        id,
+        userDisplay: info['用户'] ?? '',
+        problemTitle,
+        problemUrl,
+        score: info['分数'] ?? '',
+        time: info['耗时'] ?? '',
+        memory: info['内存'] ?? '',
+        language: info['语言'] ?? '',
+        length: info['长度'] ?? '',
+        status,
+        submitTime: info['提交时间'] ?? '',
+        judgeTime: info['评测时间'] ?? '',
+        testcases,
+        code,
+        codeLanguage,
+        isFinished,
+    };
+}
+
+// ============ 比赛相关 ============
+
+export interface ContestSummary {
+    id: string;
+    title: string;
+    type: string;
+    startTime: string;
+    endTime: string;
+    tag: string;
+    isRunning: boolean;
+}
+
+export async function fetchContests(
+    cookie?: string
+): Promise<ContestSummary[]> {
+    const url = `${BASE_URL}/contests`;
+    const { data: html } = await axios.get(url, {
+        headers: {
+            'User-Agent': 'VSCode-WZOI-Extension/0.0.1',
+            ...(cookie ? { Cookie: cookie } : {}),
+        },
+        timeout: 15000,
+    });
+    return parseContests(html);
+}
+
+function parseContests(html: string): ContestSummary[] {
+    const $ = cheerio.load(html);
+    const list: ContestSummary[] = [];
+    $('#contests-table tbody tr').each((_, tr) => {
+        const tds = $(tr).find('td');
+        if (tds.length < 6) return;
+        const id = tds.eq(0).text().trim();
+        const title = tds.eq(1).find('a').first().text().trim();
+        const type = tds.eq(2).text().trim();
+        const startTime = tds.eq(3).text().trim();
+        const endTime = tds.eq(4).text().trim();
+        const tag = tds.eq(5).text().trim();
+        // 根据开始/结束时间判断是否进行中（本地时间粗略判断）
+        const now = Date.now();
+        const start = Date.parse(startTime.replace(/-/g, '/'));
+        const end = Date.parse(endTime.replace(/-/g, '/'));
+        const isRunning = !isNaN(start) && !isNaN(end) && now >= start && now <= end;
+        list.push({ id, title, type, startTime, endTime, tag, isRunning });
+    });
+    return list;
+}
+
+// ============ 用户信息 ============
+
+/** 从已登录的首页解析当前用户名 */
+export async function fetchCurrentUsername(
+    cookie: string
+): Promise<string | undefined> {
+    const { data: html } = await axios.get(`${BASE_URL}/`, {
+        headers: {
+            'User-Agent': 'VSCode-WZOI-Extension/0.0.1',
+            Cookie: cookie,
+        },
+        timeout: 15000,
+    });
+    const $ = cheerio.load(html);
+    // 找 <a class="dropdown-item" href="/users/xxx"> 用户名 </a>
+    let username: string | undefined;
+    $('a.dropdown-item[href^="/users/"]').each((_, el) => {
+        const text = $(el).text().trim();
+        if (text && !username) username = text;
+    });
+    return username;
+}

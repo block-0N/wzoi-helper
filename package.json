@@ -27,6 +27,16 @@
           "id": "wzoiProblems",
           "name": "题目",
           "icon": "$(list-unordered)"
+        },
+        {
+          "id": "wzoiSubmissions",
+          "name": "我的提交",
+          "icon": "$(history)"
+        },
+        {
+          "id": "wzoiContests",
+          "name": "比赛",
+          "icon": "$(calendar)"
         }
       ]
     },
@@ -60,6 +70,14 @@
         "command": "wzoi-helper.submitToProblem",
         "title": "WZOI: 提交代码到此题",
         "icon": "$(cloud-upload)"
+      },
+      {
+        "command": "wzoi-helper.openSolution",
+        "title": "WZOI: 查看提交"
+      },
+      {
+        "command": "wzoi-helper.openProblemset",
+        "title": "WZOI: 打开比赛"
       }
     ],
     "menus": {

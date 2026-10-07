@@ -1,18 +1,50 @@
 import * as vscode from 'vscode';
-import { fetchProblem, problemToMarkdown } from './api/wzoi';
-import { ProblemTreeProvider } from './tree/problemTree';
-import { ProblemPanel } from './webview/problemPanel';
+import {
+    fetchProblem,
+    fetchSolution,
+    fetchCurrentUsername,
+} from './api/wzoi';
 import { loginWithPassword } from './api/auth';
 import { submitSolution, guessLanguage, LANGUAGE_OPTIONS } from './api/submit';
-import { ProblemNode } from './tree/problemTree';
+import { ProblemTreeProvider, ProblemNode } from './tree/problemTree';
+import { SubmissionTreeProvider } from './tree/submissionTree';
+import { ContestTreeProvider } from './tree/contestTree';
+import { ProblemPanel } from './webview/problemPanel';
+import { SolutionPanel } from './webview/solutionPanel';
+
 export function activate(context: vscode.ExtensionContext) {
     console.log('wzoi-helper is now active!');
 
+    // ---------- 公共 helper ----------
+    const getCookie = async (): Promise<string | undefined> => {
+        return await context.secrets.get('wzoi.cookie');
+    };
+    const getUsername = async (): Promise<string | undefined> => {
+        return await context.secrets.get('wzoi.username');
+    };
+
+    // ---------- Providers ----------
+    const treeProvider = new ProblemTreeProvider(getCookie);
+    const treeView = vscode.window.createTreeView('wzoiProblems', {
+        treeDataProvider: treeProvider,
+    });
+    treeProvider.attachTreeView(treeView);
+    const submissionProvider = new SubmissionTreeProvider(getCookie, getUsername);
+    const submissionView = vscode.window.createTreeView('wzoiSubmissions', {
+        treeDataProvider: submissionProvider,
+    });
+
+    const contestProvider = new ContestTreeProvider(getCookie);
+    const contestView = vscode.window.createTreeView('wzoiContests', {
+        treeDataProvider: contestProvider,
+    });
+
+    // ---------- 命令：Hello World（保留自脚手架）----------
     const hello = vscode.commands.registerCommand('wzoi-helper.helloWorld', () => {
         vscode.window.showInformationMessage('Hello World from wzoi-helper!');
     });
 
-    // 保留原来的“输入 ID 抓题目”命令
+    // ---------- 命令：输入 ID 抓题 ----------
     const fetch = vscode.commands.registerCommand(
         'wzoi-helper.fetchProblem',
         async () => {
@@ -29,14 +61,10 @@ export function activate(context: vscode.ExtensionContext) {
                         title: `正在抓取题目 ${id}...`,
                         cancellable: false,
                     },
-                    () => fetchProblem(id)
+                    () => fetchProblem(id, '1', undefined)
                 );
-                const md = problemToMarkdown(problem);
-                const doc = await vscode.workspace.openTextDocument({
-                    content: md,
-                    language: 'markdown',
-                });
-                await vscode.window.showTextDocument(doc);
+                // 用 Webview 打开
+                ProblemPanel.createOrShow(context.extensionUri, problem, '1');
                 vscode.window.showInformationMessage(`题目 ${id} 抓取成功`);
             } catch (err) {
                 vscode.window.showErrorMessage(`抓取失败: ${err}`);
@@ -44,22 +72,17 @@ export function activate(context: vscode.ExtensionContext) {
         }
     );
 
-    // 侧边栏树：先用匿名请求
-    const getCookie = async (): Promise<string | undefined> => {
-        return await context.secrets.get('wzoi.cookie');
-    };
-    const treeProvider = new ProblemTreeProvider(getCookie);
-    const treeView = vscode.window.createTreeView('wzoiProblems', {
-        treeDataProvider: treeProvider,
-    });
-
-    // 刷新按钮
+    // ---------- 命令：刷新 ----------
     const refresh = vscode.commands.registerCommand(
         'wzoi-helper.refreshProblems',
-        () => treeProvider.refresh()
+        () => {
+            treeProvider.refresh();
+            submissionProvider.refresh();
+            contestProvider.refresh();
+        }
     );
 
-    // 点击题目时调用（现在先弹信息，下一步换成 Webview）
+    // ---------- 命令：从侧边栏打开题目 ----------
     const openProblem = vscode.commands.registerCommand(
         'wzoi-helper.openProblem',
         async (problemsetId: string, problemId: string) => {
@@ -79,11 +102,13 @@ export function activate(context: vscode.ExtensionContext) {
             }
         }
     );
+
+    // ---------- 命令：登录（用户名密码）----------
     const loginPassword = vscode.commands.registerCommand(
         'wzoi-helper.loginPassword',
         async () => {
             const username = await vscode.window.showInputBox({
-                prompt: 'WZOI 用户名或邮箱',
+                prompt: 'WZOI 用户名',
                 ignoreFocusOut: true,
                 validateInput: (v) => (v.trim() ? null : '不能为空'),
             });
@@ -106,27 +131,45 @@ export function activate(context: vscode.ExtensionContext) {
                     () => loginWithPassword(username.trim(), password)
                 );
 
-                // 存 cookie 和账号（账号用于 cookie 过期后自动重登）
                 await context.secrets.store('wzoi.cookie', cookie);
                 await context.secrets.store('wzoi.username', username.trim());
                 await context.secrets.store('wzoi.password', password);
 
+                // 尝试解析真实用户名（用于提交列表）
+                try {
+                    const realName = await fetchCurrentUsername(cookie);
+                    if (realName) {
+                        await context.secrets.store('wzoi.username', realName);
+                    }
+                } catch {
+                    /* 忽略 */
+                }
+
                 vscode.window.showInformationMessage('WZOI 登录成功');
                 treeProvider.refresh();
+                submissionProvider.refresh();
+                contestProvider.refresh();
             } catch (err) {
                 vscode.window.showErrorMessage(`登录失败: ${err}`);
             }
         }
     );
 
-    const logout = vscode.commands.registerCommand('wzoi-helper.logout', async () => {
-        await context.secrets.delete('wzoi.cookie');
-        await context.secrets.delete('wzoi.username');
-        await context.secrets.delete('wzoi.password');
-        vscode.window.showInformationMessage('已退出 WZOI');
-        treeProvider.refresh();
-    });
+    // ---------- 命令：退出登录 ----------
+    const logout = vscode.commands.registerCommand(
+        'wzoi-helper.logout',
+        async () => {
+            await context.secrets.delete('wzoi.cookie');
+            await context.secrets.delete('wzoi.username');
+            await context.secrets.delete('wzoi.password');
+            vscode.window.showInformationMessage('已退出 WZOI');
+            treeProvider.refresh();
+            submissionProvider.refresh();
+            contestProvider.refresh();
+        }
+    );
 
+    // ---------- 命令：提交代码到题目 ----------
     const submitToProblem = vscode.commands.registerCommand(
         'wzoi-helper.submitToProblem',
         async (node: ProblemNode) => {
@@ -142,7 +185,6 @@ export function activate(context: vscode.ExtensionContext) {
                 return;
             }
 
-            // 取选区，没选区取全文
             const code = editor.selection.isEmpty
                 ? editor.document.getText()
                 : editor.document.getText(editor.selection);
@@ -151,7 +193,6 @@ export function activate(context: vscode.ExtensionContext) {
                 return;
             }
 
-            // 语言选择：默认选中根据扩展名猜出来的那个
             const guessed = guessLanguage(editor.document.fileName);
             const pick = await vscode.window.showQuickPick(
                 LANGUAGE_OPTIONS.map((o) => ({
@@ -189,17 +230,75 @@ export function activate(context: vscode.ExtensionContext) {
                 );
                 if (action === view) {
                     vscode.env.openExternal(
-                        vscode.Uri.parse(`https://wzoi.cn/solutions/${result.solutionId}`)
+                        vscode.Uri.parse(
+                            `https://wzoi.cn/solutions/${result.solutionId}`
+                        )
                     );
                 }
+
+                // 刷新提交列表，并延迟再刷两次等评测结果
+                submissionProvider.refresh();
+                setTimeout(() => submissionProvider.refresh(), 3000);
+                setTimeout(() => submissionProvider.refresh(), 8000);
             } catch (err) {
                 vscode.window.showErrorMessage(`提交失败: ${err}`);
             }
         }
     );
+
+    // ---------- 命令：查看提交详情 ----------
+    const openSolution = vscode.commands.registerCommand(
+        'wzoi-helper.openSolution',
+        async (id: number) => {
+            try {
+                const cookie = await getCookie();
+                const detail = await vscode.window.withProgress(
+                    {
+                        location: vscode.ProgressLocation.Notification,
+                        title: `加载提交 #${id}...`,
+                    },
+                    () => fetchSolution(id, cookie)
+                );
+                SolutionPanel.createOrShow(detail);
+            } catch (err) {
+                vscode.window.showErrorMessage(`加载提交失败: ${err}`);
+            }
+        }
+    );
+
+    // ---------- 命令：从侧边栏打开比赛 ----------
+    const openProblemset = vscode.commands.registerCommand(
+        'wzoi-helper.openProblemset',
+        async (problemsetId: string) => {
+            const cfg = vscode.workspace.getConfiguration('wzoi');
+            const ids = cfg.get<string[]>('problemsets') ?? [];
+            if (!ids.includes(problemsetId)) {
+                await cfg.update(
+                    'problemsets',
+                    [...ids, problemsetId],
+                    vscode.ConfigurationTarget.Global
+                );
+                treeProvider.refresh();
+                // 等 VSCode 处理完配置更新再 reveal
+                await new Promise((r) => setTimeout(r, 200));
+            }
+            await treeProvider.revealProblemset(problemsetId);
+        }
+    );
+
     context.subscriptions.push(
-        hello, fetch, refresh, openProblem, loginPassword, logout,
-        submitToProblem, treeView
+        hello,
+        fetch,
+        refresh,
+        openProblem,
+        loginPassword,
+        logout,
+        submitToProblem,
+        openSolution,
+        openProblemset,
+        treeView,
+        submissionView,
+        contestView
     );
 }
 

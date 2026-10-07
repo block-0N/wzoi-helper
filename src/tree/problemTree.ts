@@ -4,6 +4,8 @@ import { fetchProblemsetPage, ProblemSummary } from '../api/wzoi';
 export class ProblemsetNode extends vscode.TreeItem {
     totalPages?: number;
     pageCache = new Map<number, ProblemSummary[]>();
+    parent?: ProblemsetNode | PageNode;
+
     constructor(public readonly problemsetId: string) {
         super(`题库 ${problemsetId}`, vscode.TreeItemCollapsibleState.Collapsed);
         this.contextValue = 'problemset';
@@ -13,6 +15,8 @@ export class ProblemsetNode extends vscode.TreeItem {
 }
 
 export class PageNode extends vscode.TreeItem {
+    parent?: ProblemsetNode;
+
     constructor(
         public readonly problemsetId: string,
         public readonly page: number,
@@ -29,6 +33,8 @@ export class PageNode extends vscode.TreeItem {
 }
 
 export class ProblemNode extends vscode.TreeItem {
+    parent?: PageNode;
+
     constructor(public readonly summary: ProblemSummary) {
         super(summary.title, vscode.TreeItemCollapsibleState.None);
         this.contextValue = 'problem';
@@ -50,8 +56,13 @@ export class ProblemTreeProvider implements vscode.TreeDataProvider<Node> {
     readonly onDidChangeTreeData = this._onDidChangeTreeData.event;
 
     private nodes = new Map<string, ProblemsetNode>();
+    private treeView?: vscode.TreeView<Node>;
 
     constructor(private getCookie: () => Promise<string | undefined>) { }
+
+    attachTreeView(tv: vscode.TreeView<Node>) {
+        this.treeView = tv;
+    }
 
     refresh(): void {
         this.nodes.clear();
@@ -60,6 +71,27 @@ export class ProblemTreeProvider implements vscode.TreeDataProvider<Node> {
 
     getTreeItem(element: Node): vscode.TreeItem {
         return element;
+    }
+
+    getParent(element: Node): Node | undefined {
+        return element.parent;
+    }
+
+    async revealProblemset(id: string): Promise<void> {
+        // 保证根节点已构建
+        await this.getChildren();
+        const node = this.nodes.get(id);
+        if (!node) {
+            vscode.window.showWarningMessage(`找不到题库 ${id}`);
+            return;
+        }
+        if (this.treeView) {
+            await this.treeView.reveal(node, {
+                expand: true,
+                focus: true,
+                select: true,
+            });
+        }
     }
 
     async getChildren(element?: Node): Promise<Node[]> {
@@ -110,7 +142,9 @@ export class ProblemTreeProvider implements vscode.TreeDataProvider<Node> {
             const pages: PageNode[] = [];
             for (let p = 1; p <= (element.totalPages ?? 1); p++) {
                 const cached = element.pageCache.get(p);
-                pages.push(new PageNode(element.problemsetId, p, cached?.length));
+                const pageNode = new PageNode(element.problemsetId, p, cached?.length);
+                pageNode.parent = element;
+                pages.push(pageNode);
             }
             return pages;
         }
@@ -143,7 +177,12 @@ export class ProblemTreeProvider implements vscode.TreeDataProvider<Node> {
                     return [];
                 }
             }
-            return problems.map((p) => new ProblemNode(p));
+
+            return problems.map((p) => {
+                const node = new ProblemNode(p);
+                node.parent = element;
+                return node;
+            });
         }
 
         return [];
