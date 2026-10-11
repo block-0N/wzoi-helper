@@ -24,6 +24,8 @@ import { SolutionPanel } from './webview/solutionPanel';
 import { DashboardPanel } from './webview/dashboardPanel';
 import { UserPanel } from './webview/userPanel';
 import { SubmissionListPanel } from './webview/submissionListPanel';
+import { RanklistPanel } from './webview/ranklistPanel';
+import { fetchRanklist } from './api/wzoi';
 import * as path from 'path';
 import { ensureProblemWorkspace } from './workspace/problemWorkspace';
 import { runTests } from './runner/tester';
@@ -46,6 +48,12 @@ export function activate(context: vscode.ExtensionContext) {
     treeDataProvider: treeProvider,
   });
   treeProvider.attachTreeView(treeView);
+  // 从 globalState 恢复缓存的分数索引
+  const SCORE_CACHE_KEY = 'wzoi.scoreIndex';
+  const cachedScores = context.globalState.get<[string, number][]>(SCORE_CACHE_KEY);
+  if (cachedScores && cachedScores.length) {
+    treeProvider.setScoreIndex(new Map(cachedScores));
+  }
   const submissionProvider = new SubmissionTreeProvider(getCookie, getUsername);
   const submissionView = vscode.window.createTreeView('wzoiSubmissions', {
     treeDataProvider: submissionProvider,
@@ -166,6 +174,8 @@ export function activate(context: vscode.ExtensionContext) {
         treeProvider.refresh();
         submissionProvider.refresh();
         contestProvider.refresh();
+        // 后台静默同步 AC 状态
+        syncACStatusInternal(true);
       } catch (err) {
         vscode.window.showErrorMessage(`登录失败: ${err}`);
       }
@@ -279,6 +289,18 @@ export function activate(context: vscode.ExtensionContext) {
 
       if (wasCancelled || !finalDetail) return;
 
+      // 3.5) 更新这道题的 AC 状态
+      if (finalDetail.isFinished && finalDetail.problemTitle) {
+        const sc = parseFloat(finalDetail.score);
+        if (!isNaN(sc)) {
+          treeProvider.updateScore(finalDetail.problemTitle, sc);
+          await context.globalState.update(
+            SCORE_CACHE_KEY,
+            Array.from(treeProvider.getScoreIndex().entries())
+          );
+        }
+      }
+
       // 4) 结果通知
       const scoreNum = parseFloat(finalDetail.score);
       let verdictText: string;
@@ -358,33 +380,46 @@ export function activate(context: vscode.ExtensionContext) {
       await treeProvider.revealProblemset(problemsetId);
     }
   );
-  const syncACStatus = vscode.commands.registerCommand(
-    'wzoi-helper.syncACStatus',
-    async () => {
-      const username = await getUsername();
-      const cookie = await getCookie();
-      if (!username || !cookie) {
-        vscode.window.showWarningMessage('请先登录');
-        return;
-      }
-      try {
-        const subs = await vscode.window.withProgress(
+  // 后台静默同步（silent = true 时不弹进度和通知）
+  const syncACStatusInternal = async (silent: boolean): Promise<void> => {
+    const username = await getUsername();
+    const cookie = await getCookie();
+    if (!username || !cookie) {
+      if (!silent) vscode.window.showWarningMessage('请先登录');
+      return;
+    }
+    try {
+      const subs = await (silent
+        ? fetchAllMySubmissions(username, cookie)
+        : vscode.window.withProgress(
           {
             location: vscode.ProgressLocation.Notification,
             title: '同步提交记录...',
             cancellable: false,
           },
           () => fetchAllMySubmissions(username, cookie)
-        );
-        const index = buildScoreIndex(subs);
-        treeProvider.setScoreIndex(index);
+        ));
+
+      const index = buildScoreIndex(subs);
+      treeProvider.setScoreIndex(index);
+      await context.globalState.update(
+        SCORE_CACHE_KEY,
+        Array.from(index.entries())
+      );
+
+      if (!silent) {
         vscode.window.showInformationMessage(
           `已同步 ${subs.length} 条提交，覆盖 ${index.size} 道题`
         );
-      } catch (err) {
-        vscode.window.showErrorMessage(`同步失败: ${err}`);
       }
+    } catch (err) {
+      if (!silent) vscode.window.showErrorMessage(`同步失败: ${err}`);
     }
+  };
+
+  const syncACStatus = vscode.commands.registerCommand(
+    'wzoi-helper.syncACStatus',
+    () => syncACStatusInternal(false)
   );
   const openDashboard = vscode.commands.registerCommand(
     'wzoi-helper.openDashboard',
@@ -401,6 +436,73 @@ export function activate(context: vscode.ExtensionContext) {
         DashboardPanel.createOrShow(data);
       } catch (err) {
         vscode.window.showErrorMessage(`加载失败: ${err}`);
+      }
+    }
+  );
+  // ---------- 命令：查看比赛排名 ----------
+  const openRanklist = vscode.commands.registerCommand(
+    'wzoi-helper.openRanklist',
+    async (arg: unknown) => {
+      // 兼容两种入参：字符串 ID，或 ContestNode 对象（从右键菜单触发）
+      let problemsetId: string | undefined;
+      let problemsetTitle: string | undefined;
+
+      if (typeof arg === 'string') {
+        problemsetId = arg;
+      } else if (
+        arg &&
+        typeof arg === 'object' &&
+        'contest' in arg &&
+        (arg as { contest?: { id?: string; title?: string } }).contest
+      ) {
+        const c = (arg as { contest: { id?: string; title?: string } }).contest;
+        problemsetId = c.id;
+        problemsetTitle = c.title;
+      }
+
+      if (!problemsetId) {
+        vscode.window.showErrorMessage('缺少比赛 ID');
+        return;
+      }
+
+      try {
+        const cookie = await getCookie();
+        const data = await vscode.window.withProgress(
+          {
+            location: vscode.ProgressLocation.Notification,
+            title: `加载 ${problemsetTitle || '比赛 ' + problemsetId} 排名...`,
+          },
+          () => fetchRanklist(problemsetId!, cookie)
+        );
+
+        if (!data.rows.length) {
+          vscode.window.showInformationMessage('这场比赛还没有排名数据');
+          return;
+        }
+
+        RanklistPanel.createOrShow(data);
+      } catch (err) {
+        vscode.window.showErrorMessage(`加载排名失败: ${err}`);
+      }
+    }
+  );
+
+  // ---------- 命令：打开用户主页（供排名页调用） ----------
+  const openUser = vscode.commands.registerCommand(
+    'wzoi-helper.openUser',
+    async (uid: string) => {
+      try {
+        const cookie = await getCookie();
+        const profile = await vscode.window.withProgress(
+          {
+            location: vscode.ProgressLocation.Notification,
+            title: `加载用户 ${uid}...`,
+          },
+          () => fetchUserProfile(uid, cookie)
+        );
+        UserPanel.createOrShow(profile);
+      } catch (err) {
+        vscode.window.showErrorMessage(`加载用户主页失败: ${err}`);
       }
     }
   );
@@ -461,16 +563,20 @@ export function activate(context: vscode.ExtensionContext) {
   // ---------- 命令：从主页链接直达（无交互）----------
   const openUserSubmissions = vscode.commands.registerCommand(
     'wzoi-helper.openUserSubmissions',
-    async (userName: string, filter: 'all' | 'ac') => {
+    async (userName: string, filter: 'all' | 'ac', problemId?: string) => {
       try {
         const cookie = await getCookie();
         const filters: import('./api/wzoi').SubmissionFilters = {
           userName,
+          problemId: problemId || undefined,
           scoreMin: filter === 'ac' ? '100' : '',
           scoreMax: filter === 'ac' ? '100' : '',
         };
-        const title =
-          filter === 'ac' ? `${userName} 的通过题目` : `${userName} 的提交记录`;
+
+        let title = filter === 'ac' ? `${userName} 的通过题目` : `${userName} 的提交记录`;
+        if (problemId) {
+          title = `${userName} 在题目 ${problemId} 的提交`;
+        }
 
         const items = await vscode.window.withProgress(
           {
@@ -868,8 +974,13 @@ export function activate(context: vscode.ExtensionContext) {
     openDashboard, searchByTagCmd, searchCmd,
     createWorkspace, runLocalTests,
     openSubmissions, openUserSubmissions,
+    openRanklist, openUser,
     treeView, submissionView, contestView
   );
+  // 启动后延迟 3 秒静默同步一次
+  setTimeout(() => {
+    syncACStatusInternal(true);
+  }, 3000);
 }
 
 export function deactivate() { }

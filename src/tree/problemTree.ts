@@ -65,6 +65,17 @@ export class ProblemTreeProvider implements vscode.TreeDataProvider<Node> {
         this.scoreIndex = index;
         this._onDidChangeTreeData.fire(undefined);
     }
+    updateScore(title: string, score: number) {
+        const prev = this.scoreIndex.get(title) ?? -1;
+        if (score > prev) {
+            this.scoreIndex.set(title, score);
+            this._onDidChangeTreeData.fire(undefined);
+        }
+    }
+
+    getScoreIndex(): Map<string, number> {
+        return this.scoreIndex;
+    }
     attachTreeView(tv: vscode.TreeView<Node>) {
         this.treeView = tv;
     }

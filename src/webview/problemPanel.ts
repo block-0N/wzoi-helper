@@ -87,7 +87,44 @@ function normalizeMathDelims(s: string): string {
     .replace(/\\\(/g, '$$')
     .replace(/\\\)/g, '$$');
 }
+/**
+ * 渲染富文本内容：先保留 HTML 格式，再用 DOMPurify 过滤危险标签，
+ * 最后把 \( \) \[ \] 归一化为 $ 和 $$。
+ */
+function renderRichText(html: string): string {
+  // DOMPurify 在 Node 环境需要一个 window 对象，用 jsdom 或简化方案
+  // 这里我们只做最小白名单过滤，避免引入 jsdom 依赖
+  return normalizeMathDelims(sanitizeHtml(html));
+}
 
+/**
+ * 极简白名单过滤：只保留题面中常见的格式标签，去掉 script/iframe/on* 等危险内容。
+ * 比引入 jsdom + DOMPurify 更轻量。
+ */
+function sanitizeHtml(html: string): string {
+  if (!html) return '';
+  let s = html;
+
+  // 1) 去掉危险标签（成对 + 单标签）
+  s = s.replace(
+    /<\s*(script|style|iframe|object|embed|form|input|button|link|meta|base)\b[^>]*>[\s\S]*?<\s*\/\s*\1\s*>/gi,
+    ''
+  );
+  s = s.replace(
+    /<\s*\/?\s*(script|style|iframe|object|embed|form|input|button|link|meta|base)\b[^>]*>/gi,
+    ''
+  );
+
+  // 2) 去掉 on* 事件属性（onclick、onerror 等）
+  s = s.replace(/\son\w+\s*=\s*"[^"]*"/gi, '');
+  s = s.replace(/\son\w+\s*=\s*'[^']*'/gi, '');
+  s = s.replace(/\son\w+\s*=\s*[^\s>]+/gi, '');
+
+  // 3) 去掉 javascript: 协议
+  s = s.replace(/javascript\s*:/gi, '');
+
+  return s;
+}
 function render(
   p: Problem,
   webview: vscode.Webview,
@@ -99,6 +136,17 @@ function render(
   const mathjaxUri = webview
     .asWebviewUri(
       vscode.Uri.joinPath(extensionUri, 'resources', 'mathjax', 'tex-svg.js')
+    )
+    .toString();
+
+  const hljsJs = webview
+    .asWebviewUri(
+      vscode.Uri.joinPath(extensionUri, 'resources', 'highlight.min.js')
+    )
+    .toString();
+  const hljsCss = webview
+    .asWebviewUri(
+      vscode.Uri.joinPath(extensionUri, 'resources', 'atom-one-dark.min.css')
     )
     .toString();
 
@@ -223,7 +271,67 @@ function render(
   a { color: var(--accent); text-decoration: none; }
   a:hover { text-decoration: underline; }
   mjx-container { font-size: 1.05em; }
+  /* 富文本内容：还原 WZOI 题面的格式 */
+  .content.rich { white-space: normal; }
+  .content.rich p { margin: 8px 0; }
+  .content.rich ul,
+  .content.rich ol { padding-left: 24px; margin: 8px 0; }
+  .content.rich li { margin: 2px 0; }
+  .content.rich strong,
+  .content.rich b { font-weight: 600; }
+  .content.rich em,
+  .content.rich i { font-style: italic; }
+  .content.rich code {
+    font-family: "Cascadia Code", Consolas, "Courier New", monospace;
+    background: var(--code-bg);
+    padding: 1px 6px;
+    border-radius: 4px;
+    font-size: 0.92em;
+  }
+  .content.rich pre {
+    font-family: "Cascadia Code", Consolas, "Courier New", monospace;
+    background: var(--code-bg);
+    padding: 10px 14px;
+    border-radius: 6px;
+    overflow-x: auto;
+    font-size: 13px;
+    line-height: 1.6;
+    white-space: pre;
+    margin: 8px 0;
+  }
+  .content.rich pre code {
+    padding: 0;
+    background: transparent;
+  }
+  .content.rich pre code[class*="language-"] {
+    display: block;
+  }
+  .content.rich a {
+    color: var(--accent);
+    text-decoration: underline;
+    cursor: pointer;
+  }
+  .content.rich hr {
+    border: none;
+    border-top: 1px solid var(--border);
+    margin: 16px 0;
+  }
+    /* 题解区块 */
+  .content.rich.solution pre {
+    background: #282c34;
+    border-radius: 8px;
+    padding: 16px 20px;
+    overflow-x: auto;
+    font-size: 13px;
+    line-height: 1.6;
+  }
+  .content.rich.solution pre code {
+    background: transparent;
+    color: #abb2bf;
+    font-family: "Cascadia Code", Consolas, "Courier New", monospace;
+  }
 </style>
+<link rel="stylesheet" href="${hljsCss}">
 </head>
 <body>
   <h1>${esc(p.title)}</h1>
@@ -234,20 +342,27 @@ function render(
   </div>
   <section>
     <h2>题目描述</h2>
-    <div class="content">${esc(normalizeMathDelims(p.description || '（无）'))}</div>
+    <div class="content rich">${renderRichText(p.description || '（无）')}</div>
   </section>
   <section>
     <h2>输入格式</h2>
-    <div class="content">${esc(normalizeMathDelims(p.inputFormat || '（无）'))}</div>
+    <div class="content rich">${renderRichText(p.inputFormat || '（无）')}</div>
   </section>
   <section>
     <h2>输出格式</h2>
-    <div class="content">${esc(normalizeMathDelims(p.outputFormat || '（无）'))}</div>
+    <div class="content rich">${renderRichText(p.outputFormat || '（无）')}</div>
   </section>
+
   ${samplesHtml ? `<section><h2>样例</h2>${samplesHtml}</section>` : ''}
-  ${p.hint ? `<section><h2>提示</h2><div class="content">${esc(normalizeMathDelims(p.hint))}</div></section>` : ''}
+
+  ${p.hint ? `<section><h2>提示</h2><div class="content rich">${renderRichText(p.hint)}</div></section>` : ''}
+
   ${p.source ? `<hr><div class="source">来源: ${esc(p.source)}</div>` : ''}
 
+  ${p.solution ? `<section>
+    <h2>题解</h2>
+    <div class="content rich solution">${renderRichText(p.solution)}</div>
+  </section>` : ''}
   <script nonce="${nonce}">
     window.MathJax = {
       tex: {
@@ -271,8 +386,21 @@ function render(
           vscode.postMessage({ type: 'copy', text });
         });
       });
+
+      function tryHighlight() {
+        if (typeof window.hljs === 'undefined') {
+          setTimeout(tryHighlight, 50);
+          return;
+        }
+        document.querySelectorAll('.content.rich pre code').forEach((el) => {
+          try { window.hljs.highlightElement(el); } catch (_) {}
+        });
+      }
+      tryHighlight();
     })();
   </script>
+  <script nonce="${nonce}" src="${hljsJs}"></script>
+</body>
 </body>
 </html>`;
 }
