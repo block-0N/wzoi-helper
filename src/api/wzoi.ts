@@ -31,10 +31,14 @@ export async function fetchProblem(
     },
     timeout: 15000,
   });
-  return parseProblem(id, html);
+  return parseProblem(id, html, cookie);
 }
 
-function parseProblem(id: string, html: string): Problem {
+async function parseProblem(
+  id: string,
+  html: string,
+  cookie?: string
+): Promise<Problem> {
   const $ = cheerio.load(html);
 
   // 题目主容器
@@ -64,6 +68,31 @@ function parseProblem(id: string, html: string): Problem {
   const inputFormat = getSection('输入格式');
   const outputFormat = getSection('输出格式');
   const hint = getSection('提示');
+
+  // 把字段里的相对路径图片下载为 base64（WZOI 图片需要 Cookie 才能访问）
+  const inlineImages = async (htmlStr: string): Promise<string> => {
+    if (!htmlStr || !htmlStr.includes('<img')) return htmlStr;
+    const $ = cheerio.load(htmlStr, null, false);
+    const imgs = $('img').toArray();
+    for (const el of imgs) {
+      const $el = $(el);
+      const s = $el.attr('src') || '';
+      if (!s) continue;
+      if (s.startsWith('data:')) continue;
+      const dataUri = await fetchImageAsDataUri(s, cookie);
+      if (dataUri) {
+        $el.attr('src', dataUri);
+      } else {
+        $el.remove();
+      }
+    }
+    return $.html() || htmlStr;
+  };
+
+  const descriptionHtml = await inlineImages(description);
+  const inputFormatHtml = await inlineImages(inputFormat);
+  const outputFormatHtml = await inlineImages(outputFormat);
+  const hintHtml = await inlineImages(hint);
   // 题解：在 #tutorial 标签页里，通常是一个 <pre> 代码块
   const tutorialEl = $('#tutorial');
   let solution = '';
@@ -71,6 +100,7 @@ function parseProblem(id: string, html: string): Problem {
     // 保留 pre/code 结构和 class（用于语法高亮）
     solution = (tutorialEl.html() ?? '').trim();
   }
+  const solutionHtml = await inlineImages(solution);
   // 样例：.sample_io 按顺序成对出现（输入、输出、输入、输出……）
   const sampleTexts: string[] = [];
   container.find('pre.sample_io').each((_, el) => {
@@ -98,15 +128,15 @@ function parseProblem(id: string, html: string): Problem {
   return {
     id,
     title,
-    description,
-    inputFormat,
-    outputFormat,
+    description: descriptionHtml,
+    inputFormat: inputFormatHtml,
+    outputFormat: outputFormatHtml,
     samples,
-    hint,
+    hint: hintHtml,
     timeLimit,
     memoryLimit,
     source,
-    solution,
+    solution: solutionHtml,
   };
 }
 
@@ -879,14 +909,21 @@ async function fetchImageAsDataUri(
 ): Promise<string> {
   if (!url) return '';
   try {
-    const full = url.startsWith('//')
-      ? `https:${url}`
-      : url.startsWith('/')
-        ? `https://wzoi.cn${url}`
-        : url;
+    let full = url;
+    if (url.startsWith('//')) {
+      full = `https:${url}`;
+    } else if (url.startsWith('/')) {
+      full = `https://wzoi.cn${url}`;
+    } else if (url.startsWith('../')) {
+      // WZOI 常用 ../../files/... 形式，对应 https://wzoi.cn/files/...
+      full = 'https://wzoi.cn/' + url.replace(/^(\.\.\/)+/, '');
+    } else if (!/^https?:/i.test(url)) {
+      full = `https://wzoi.cn/${url}`;
+    }
     const resp = await axios.get(full, {
       headers: {
         'User-Agent': 'VSCode-WZOI-Extension/0.0.1',
+        'Referer': 'https://wzoi.cn/',
         ...(cookie ? { Cookie: cookie } : {}),
       },
       responseType: 'arraybuffer',
@@ -895,7 +932,7 @@ async function fetchImageAsDataUri(
     const mime = String(resp.headers['content-type'] || 'image/png');
     const b64 = Buffer.from(resp.data).toString('base64');
     return `data:${mime};base64,${b64}`;
-  } catch {
+  } catch (err: any) {
     return '';
   }
 }

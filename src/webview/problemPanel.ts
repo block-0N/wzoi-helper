@@ -81,11 +81,9 @@ export class ProblemPanel {
 
 /** 把 \( \) \[ \] 统一成 $ $ $$ $$，避免反斜杠残留问题 */
 function normalizeMathDelims(s: string): string {
-  return s
-    .replace(/\\\[/g, '$$$$')
-    .replace(/\\\]/g, '$$$$')
-    .replace(/\\\(/g, '$$')
-    .replace(/\\\)/g, '$$');
+  s = s.replace(/\\\[([\s\S]*?)\\\]/g, (_m, inner) => '$$' + inner + '$$');
+  s = s.replace(/\\\(([\s\S]*?)\\\)/g, (_m, inner) => '$' + inner + '$');
+  return s;
 }
 /**
  * 渲染富文本内容：先保留 HTML 格式，再用 DOMPurify 过滤危险标签，
@@ -186,7 +184,7 @@ function render(
     style-src 'unsafe-inline' ${webview.cspSource};
     script-src 'nonce-${nonce}' ${webview.cspSource} 'unsafe-eval' blob:;
     font-src ${webview.cspSource};
-    img-src https: data: ${webview.cspSource};">
+    img-src https: data: https://wzoi.cn ${webview.cspSource};">
 <style>
   :root {
     --fg: var(--vscode-foreground);
@@ -366,13 +364,15 @@ function render(
   <script nonce="${nonce}">
     window.MathJax = {
       tex: {
-        inlineMath: [['$', '$'], ['\\(', '\\)']],
-        displayMath: [['$$', '$$'], ['\\[', '\\]']],
+        inlineMath: [['$', '$']],
+        displayMath: [['$$', '$$']],
         processEscapes: true,
       },
       svg: { fontCache: 'global' },
       options: {
         skipHtmlTags: ['script', 'noscript', 'style', 'textarea', 'pre', 'code'],
+        ignoreHtmlClass: 'tex2jax_ignore',
+        processHtmlClass: 'tex2jax_process',
       },
     };
   </script>
@@ -380,6 +380,14 @@ function render(
   <script nonce="${nonce}">
     (function() {
       const vscode = acquireVsCodeApi();
+
+      // 修正题目里相对路径的图片（WZOI 常用 ../../files/... 形式）
+      document.querySelectorAll('.content img').forEach((img) => {
+        const src = img.getAttribute('src');
+        if (!src) return;
+        if (/^(https?:)?\/\//i.test(src) || src.startsWith('data:')) return;
+        img.src = 'https://wzoi.cn/' + src.replace(/^(\.\.\/)+/, '').replace(/^\//, '');
+      });
       document.querySelectorAll('.copy-btn').forEach((btn) => {
         btn.addEventListener('click', () => {
           const text = decodeURIComponent(btn.getAttribute('data-copy'));
