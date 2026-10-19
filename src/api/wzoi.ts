@@ -102,13 +102,37 @@ async function parseProblem(
   }
   const solutionHtml = await inlineImages(solution);
   // 样例：.sample_io 按顺序成对出现（输入、输出、输入、输出……）
-  const sampleTexts: string[] = [];
-  container.find('pre.sample_io').each((_, el) => {
-    sampleTexts.push($(el).text().trim());
-  });
+  // 样例：pre.sample_io 按顺序成对出现（输入、输出、输入、输出……）
+  // 每个 pre 内部可能包含多个样例（用 "样例N" 行分隔）
+  const splitMultiSamples = (text: string): string[] => {
+    const t = text.replace(/\r\n/g, '\n').trim();
+    if (!t) return [];
+    if (/^样例\s*\d+\s*$/m.test(t)) {
+      const parts = t
+        .split(/^样例\s*\d+\s*$/m)
+        .map((s) => s.trim())
+        .filter((s) => s);
+      if (parts.length > 0) return parts;
+    }
+    return [t];
+  };
+  
+  const sampleInputs: string[] = [];
+  const sampleOutputs: string[] = [];
+  const samplePres = container.find('pre.sample_io').toArray();
+  for (let i = 0; i < samplePres.length; i++) {
+    const raw = $(samplePres[i]).text();
+    const parts = splitMultiSamples(raw);
+    if (i % 2 === 0) {
+      sampleInputs.push(...parts);
+    } else {
+      sampleOutputs.push(...parts);
+    }
+  }
   const samples: { input: string; output: string }[] = [];
-  for (let i = 0; i + 1 < sampleTexts.length; i += 2) {
-    samples.push({ input: sampleTexts[i], output: sampleTexts[i + 1] });
+  const sampleCount = Math.min(sampleInputs.length, sampleOutputs.length);
+  for (let i = 0; i < sampleCount; i++) {
+    samples.push({ input: sampleInputs[i], output: sampleOutputs[i] });
   }
 
   // 时间/空间限制从整段文本里正则提取

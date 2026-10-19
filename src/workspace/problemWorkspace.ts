@@ -34,6 +34,19 @@ export async function ensureProblemWorkspace(
     fs.writeFileSync(cppPath, CPP_TEMPLATE, 'utf8');
   }
 
+  // 旧版会把多组样例合并到 1.in/1.out，检测到 "样例N" 字样时清空所有 .in/.out
+  const firstInPath = path.join(dir, '1.in');
+  if (fs.existsSync(firstInPath)) {
+    const oldContent = fs.readFileSync(firstInPath, 'utf8');
+    if (/^样例\s*\d+/m.test(oldContent)) {
+      const oldFiles = fs.readdirSync(dir);
+      for (const f of oldFiles) {
+        if (f.endsWith('.in') || f.endsWith('.out')) {
+          try { fs.unlinkSync(path.join(dir, f)); } catch {}
+        }
+      }
+    }
+  }
   // 样例文件
   for (let i = 0; i < problem.samples.length; i++) {
     const s = problem.samples[i];
