@@ -1,3 +1,6 @@
+import { ProblemListPanel } from './webview/problemListPanel';
+import { getCachedIndex, buildIndex } from './indexer/problemIndexer';
+import { fetchAllProblemsets } from './api/wzoi';
 import * as vscode from 'vscode';
 import {
   fetchProblem,
@@ -40,7 +43,88 @@ export function activate(context: vscode.ExtensionContext) {
     return await context.secrets.get('wzoi.username');
   };
   const wzoiOutput = vscode.window.createOutputChannel('WZOI');
-  context.subscriptions.push(wzoiOutput);
+    const buildProblemIndex = vscode.commands.registerCommand(
+      'wzoi-helper.buildProblemIndex',
+      async () => {
+        const cookie = await getCookie();
+        const output = vscode.window.createOutputChannel('WZOI Index');
+        output.show(true);
+        output.appendLine('开始构建题库索引...');
+
+        const startTime = Date.now();
+        try {
+          const index = await vscode.window.withProgress(
+            {
+              location: vscode.ProgressLocation.Notification,
+              title: '构建题库索引',
+              cancellable: true,
+            },
+            (progress, token) => buildIndex(context, cookie, progress, token)
+          );
+
+          const elapsed = ((Date.now() - startTime) / 1000).toFixed(1);
+          const total = index.problems.length;
+          const withTags = index.problems.filter((p) => p.tags.length > 0).length;
+          const withRate = index.problems.filter((p) => p.passRate).length;
+          const withMultiPs = index.problems.filter((p) => p.problemsets.length > 1).length;
+
+          output.appendLine(`完成，耗时 ${elapsed}s`);
+          output.appendLine(`题目总数: ${total}`);
+          output.appendLine(`有标签: ${withTags} (${((withTags / total) * 100).toFixed(1)}%)`);
+          output.appendLine(`有通过率: ${withRate} (${((withRate / total) * 100).toFixed(1)}%)`);
+          output.appendLine(`属于多个题库: ${withMultiPs}`);
+
+          vscode.window.showInformationMessage(
+            `索引完成：${total} 题，${withTags} 有标签，${withRate} 有通过率，耗时 ${elapsed}s`
+          );
+
+          // 如果题库列表 Webview 已打开，自动刷新它
+          if (ProblemListPanel.currentPanel) {
+            const newScoreIndex = treeProvider.getScoreIndex();
+            const scoreArr = Array.from(newScoreIndex.entries());
+            const scoreUri = vscode.Uri.joinPath(context.globalStorageUri, 'score-index.json');
+            await vscode.workspace.fs.writeFile(
+              scoreUri,
+              Buffer.from(JSON.stringify(scoreArr), 'utf8')
+            );
+            const dataUri = vscode.Uri.joinPath(context.globalStorageUri, 'problem-index.json');
+            ProblemListPanel.createOrShow(context.extensionUri, context.globalStorageUri, dataUri, scoreUri);
+          }
+        } catch (err) {
+          output.appendLine(`失败: ${err}`);
+          vscode.window.showErrorMessage(`构建索引失败: ${err}`);
+        }
+      }
+    );
+    const openProblemList = vscode.commands.registerCommand(
+      'wzoi-helper.openProblemList',
+      async () => {
+        const index = await getCachedIndex(context);
+        if (!index) {
+          const action = await vscode.window.showWarningMessage(
+            '题库索引尚未构建，是否现在构建？（大约需要 20 秒~1 分钟）',
+            '构建索引',
+            '取消'
+          );
+          if (action === '构建索引') {
+            vscode.commands.executeCommand('wzoi-helper.buildProblemIndex');
+          }
+          return;
+        }
+        const scoreIndex = treeProvider.getScoreIndex();
+        const scoreArr = Array.from(scoreIndex.entries());
+        const scoreUri = vscode.Uri.joinPath(context.globalStorageUri, 'score-index.json');
+        await vscode.workspace.fs.writeFile(
+          scoreUri,
+          Buffer.from(JSON.stringify(scoreArr), 'utf8')
+        );
+        const dataUri = vscode.Uri.joinPath(context.globalStorageUri, 'problem-index.json');
+        ProblemListPanel.createOrShow(context.extensionUri, context.globalStorageUri, dataUri, scoreUri);
+      }
+    );
+
+
+  context.subscriptions.push(wzoiOutput, buildProblemIndex, openProblemList);
   wzoiOutput.appendLine('WZOI 扩展已激活');
   // ---------- Providers ----------
   const treeProvider = new ProblemTreeProvider(getCookie);
@@ -121,7 +205,9 @@ export function activate(context: vscode.ExtensionContext) {
           },
           () => fetchProblem(problemId, problemsetId, cookie)
         );
-        ProblemPanel.createOrShow(context.extensionUri, problem, problemsetId, wzoiOutput);
+        const idx = await getCachedIndex(context);
+        const rec = idx?.problems.find((x) => x.pid === problemId);
+        ProblemPanel.createOrShow(context.extensionUri, problem, problemsetId, wzoiOutput, rec);
       } catch (err) {
         vscode.window.showErrorMessage(`打开题目失败: ${err}`);
       }
@@ -241,22 +327,65 @@ export function activate(context: vscode.ExtensionContext) {
         return;
       }
 
-      // 1) 提交
-      let solutionId: number;
-      try {
-        const result = await vscode.window.withProgress(
-          {
-            location: vscode.ProgressLocation.Notification,
-            title: `提交至题库 ${problemsetId} 题目 ${problemId}...`,
-          },
-          () => submitSolution(problemsetId, problemId, code, pick.id, cookie)
-        );
-        solutionId = result.solutionId;
-        submissionProvider.refresh();
-      } catch (err) {
-        vscode.window.showErrorMessage(`提交失败: ${err}`);
-        return;
+      // 查题目属于哪些题库
+      const idx = await getCachedIndex(context);
+      const rec = idx?.problems.find((x) => x.pid === problemId);
+      const allPs = rec && rec.problemsets.length > 0
+        ? rec.problemsets
+        : [{ id: problemsetId, title: `题库 ${problemsetId}` }];
+
+      // 多选题库
+      const psPicks = await vscode.window.showQuickPick(
+        allPs.map((ps) => ({
+          label: ps.title,
+          description: `题库 ${ps.id}`,
+          id: ps.id,
+          picked: allPs.length === 1,
+        })),
+        {
+          placeHolder:
+            allPs.length > 1
+              ? `该题属于 ${allPs.length} 个题库，选择要提交的（可多选）`
+              : '确认提交题库',
+          canPickMany: true,
+        }
+      );
+      if (!psPicks || psPicks.length === 0) return;
+
+      // 逐个提交
+      const submittedIds: { psId: string; psTitle: string; solutionId: number }[] = [];
+      for (let psIdx = 0; psIdx < psPicks.length; psIdx++) {
+        const ps = psPicks[psIdx];
+        // 多题库提交之间加延迟，避免触发 WAF 频率限制
+        if (psIdx > 0) await new Promise((r) => setTimeout(r, 2000));
+        try {
+          const result = await vscode.window.withProgress(
+            {
+              location: vscode.ProgressLocation.Notification,
+              title: `提交至 ${ps.label}...`,
+            },
+            () => submitSolution(ps.id, problemId, code, pick.id, cookie)
+          );
+          submittedIds.push({ psId: ps.id, psTitle: ps.label, solutionId: result.solutionId });
+          submissionProvider.refresh();
+        } catch (err) {
+          const fullMsg = String(err);
+          // 完整错误写进 WZOI 输出通道（用户一定能看到）
+          wzoiOutput.show(true);
+          wzoiOutput.appendLine('');
+          wzoiOutput.appendLine('===== 提交失败 =====');
+          wzoiOutput.appendLine(`题库: ${ps.label} (ID: ${ps.id})`);
+          wzoiOutput.appendLine(`题目: ${problemId}`);
+          wzoiOutput.appendLine(fullMsg);
+          wzoiOutput.appendLine('===================');
+          // 弹窗显示简短版
+          const shortMsg = fullMsg.length > 300 ? fullMsg.slice(0, 300) + '...(详见输出面板 WZOI)' : fullMsg;
+          vscode.window.showErrorMessage(`提交到 ${ps.label} 失败: ${shortMsg}`);
+        }
       }
+
+      if (submittedIds.length === 0) return;
+      const solutionId = submittedIds[0].solutionId;
 
       // 2) 轮询等待评测结果
       let finalDetail: import('./api/wzoi').SolutionDetail | undefined;
@@ -402,6 +531,15 @@ export function activate(context: vscode.ExtensionContext) {
 
       const index = buildScoreIndex(subs);
       treeProvider.setScoreIndex(index);
+
+    // 诊断日志：确认同步结果
+    wzoiOutput.appendLine(
+      '[sync] 已同步 ' + subs.length + ' 条提交，覆盖 ' + index.size + ' 道题'
+    );
+    wzoiOutput.appendLine(
+      '[sync] 前 3 条样例: ' +
+        subs.slice(0, 3).map((s) => s.problemTitle + '=' + s.score).join(' | ')
+    );
       await context.globalState.update(
         SCORE_CACHE_KEY,
         Array.from(index.entries())
@@ -981,6 +1119,9 @@ export function activate(context: vscode.ExtensionContext) {
   setTimeout(() => {
     syncACStatusInternal(true);
   }, 3000);
+
+  // 启动后延迟 3 秒自动同步 AC 状态（后台静默）
+  // (重复的启动同步已移除)
 }
 
 export function deactivate() { }

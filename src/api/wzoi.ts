@@ -26,7 +26,7 @@ export async function fetchProblem(
   const url = `${BASE_URL}/s/${problemsetId}/${id}`;
   const { data: html } = await axios.get(url, {
     headers: {
-      'User-Agent': 'VSCode-WZOI-Extension/0.0.1',
+      'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
       ...(cookie ? { Cookie: cookie } : {}),
     },
     timeout: 15000,
@@ -212,6 +212,14 @@ export interface ProblemSummary {
   problemId: string;
   title: string;
   problemsetTitle?: string;
+  /** 提交数（普通题库列表页才有） */
+  submitCount?: string;
+  /** 通过率，如 "52.19%" */
+  passRate?: string;
+  /** 来源，如 "原创" */
+  source?: string;
+  /** 标签列表 */
+  tags?: { id: string; name: string }[];
 }
 
 export interface ProblemsetMeta {
@@ -233,7 +241,7 @@ export async function fetchProblemsetPage(
   const url = `${BASE_URL}/s/${problemsetId}?page=${page}`;
   const { data: html } = await axios.get(url, {
     headers: {
-      'User-Agent': 'VSCode-WZOI-Extension/0.0.1',
+      'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
       ...(cookie ? { Cookie: cookie } : {}),
     },
     timeout: 15000,
@@ -294,11 +302,8 @@ function parseProblemset(problemsetId: string, html: string): ProblemsetMeta {
   const $ = cheerio.load(html);
 
   const title = $('h1.page-header').first().text().trim();
-
-  // 面包屑里如果有指向 /contests 的链接，就是比赛页面
   const isContest = $('ol.breadcrumb a[href="/contests"]').length > 0;
 
-  // 描述：h1 后到表格前的所有 <p>
   const descParts: string[] = [];
   const $h1 = $('h1.page-header').first();
   let cursor = $h1.next();
@@ -310,22 +315,80 @@ function parseProblemset(problemsetId: string, html: string): ProblemsetMeta {
     cursor = cursor.next();
   }
 
-  // 题目：表格里每个 tr 的 td.text-left 里的 a
+  const headerMap = new Map<string, number>();
+  $('table.table thead tr th').each((idx, el) => {
+    const name = $(el).text().trim();
+    if (name) headerMap.set(name, idx);
+  });
+
+  const nameIdx = headerMap.get('名称');
+  const submitIdx = headerMap.get('提交数');
+  const rateIdx = headerMap.get('通过率');
+  const tagIdx = headerMap.get('标签');
+  const sourceIdx = headerMap.get('来源');
+
   const problems: ProblemSummary[] = [];
   const seen = new Set<string>();
+
   $('table.table tbody tr').each((_, tr) => {
-    const a = $(tr).find('td.text-left a').first();
-    if (!a.length) return;
-    const href = a.attr('href') ?? '';
-    const m = href.match(/^\/s\/(\d+)\/(\d+)/);
-    if (!m) return;
-    const key = `${m[1]}/${m[2]}`;
-    if (seen.has(key)) return;
-    seen.add(key);
+    const tds = $(tr).find('td');
+    if (tds.length === 0) return;
+
+    let link: ReturnType<typeof $> | undefined;
+    if (nameIdx !== undefined && nameIdx < tds.length) {
+      const cand = tds.eq(nameIdx).find('a').first();
+      if (cand.length) link = cand;
+    }
+    if (!link || !link.length) {
+      tds.each((_, td) => {
+        if (link && link.length) return;
+        const cand = $(td).find('a[href^="/s/"]').first();
+        if (cand.length && /^\/s\/\d+\/\d+/.test(cand.attr('href') ?? '')) {
+          link = cand;
+        }
+      });
+    }
+    if (!link || !link.length) return;
+
+    const href = link.attr('href') ?? '';
+    const pm = href.match(/^\/s\/(\d+)\/(\d+)/);
+    if (!pm) return;
+
+    const pid = pm[2];
+    if (seen.has(pid)) return;
+    seen.add(pid);
+
+    const submitCount =
+      submitIdx !== undefined && submitIdx < tds.length
+        ? tds.eq(submitIdx).text().trim()
+        : undefined;
+    const passRate =
+      rateIdx !== undefined && rateIdx < tds.length
+        ? tds.eq(rateIdx).text().trim()
+        : undefined;
+    const source =
+      sourceIdx !== undefined && sourceIdx < tds.length
+        ? tds.eq(sourceIdx).text().trim()
+        : undefined;
+
+    const tags: { id: string; name: string }[] = [];
+    if (tagIdx !== undefined && tagIdx < tds.length) {
+      tds.eq(tagIdx).find('a.openpop').each((_, tagEl) => {
+        const tagHref = $(tagEl).attr('href') ?? '';
+        const tm = tagHref.match(/#tag-(\d+)/);
+        const tagName = $(tagEl).text().trim();
+        if (tm && tagName) tags.push({ id: tm[1], name: tagName });
+      });
+    }
+
     problems.push({
-      problemsetId: m[1],
-      problemId: m[2],
-      title: a.text().trim(),
+      problemsetId: pm[1],
+      problemId: pid,
+      title: link.text().trim(),
+      submitCount: submitCount || undefined,
+      passRate: passRate || undefined,
+      source: source || undefined,
+      tags: tags.length > 0 ? tags : undefined,
     });
   });
 
@@ -385,7 +448,7 @@ export async function fetchMySubmissions(
   const url = `${BASE_URL}/solutions?user_name=${encodeURIComponent(username)}`;
   const { data: html } = await axios.get(url, {
     headers: {
-      'User-Agent': 'VSCode-WZOI-Extension/0.0.1',
+      'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
       ...(cookie ? { Cookie: cookie } : {}),
     },
     timeout: 15000,
@@ -425,7 +488,7 @@ export async function fetchSolution(
   const url = `${BASE_URL}/solutions/${id}`;
   const { data: html } = await axios.get(url, {
     headers: {
-      'User-Agent': 'VSCode-WZOI-Extension/0.0.1',
+      'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
       ...(cookie ? { Cookie: cookie } : {}),
     },
     timeout: 15000,
@@ -512,7 +575,7 @@ export async function fetchContests(
   const url = `${BASE_URL}/contests`;
   const { data: html } = await axios.get(url, {
     headers: {
-      'User-Agent': 'VSCode-WZOI-Extension/0.0.1',
+      'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
       ...(cookie ? { Cookie: cookie } : {}),
     },
     timeout: 15000,
@@ -550,7 +613,7 @@ export async function fetchCurrentUsername(
 ): Promise<string | undefined> {
   const { data: html } = await axios.get(`${BASE_URL}/`, {
     headers: {
-      'User-Agent': 'VSCode-WZOI-Extension/0.0.1',
+      'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
       Cookie: cookie,
     },
     timeout: 15000,
@@ -580,26 +643,101 @@ export async function fetchAllMySubmissions(
   let url: string | undefined = `${BASE_URL}/solutions?${params.toString()}`;
   let page = 0;
 
+  console.log(
+    '[fetchAllMySubmissions] 开始，cookie=' + (cookie ? '有' : '无')
+  );
+
+  const UA =
+    'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36';
+
+  // 检测是否是 WZOI 的 EO_Bot_Ssid 反爬页
+  const isBotPage = (html: string): boolean => {
+    return (
+      (html.length < 3000 && html.includes('EO_Bot_Ssid')) ||
+      html.includes('_0x649a') ||
+      (html.length < 3000 && html.includes('_0x'))
+    );
+  };
+
+  let consecutiveBotPages = 0;
+
   while (url && page < 200) {
     page++;
-    const { data: html } = await axios.get(url, {
-      headers: {
-        'User-Agent': 'VSCode-WZOI-Extension/0.0.1',
-        ...(cookie ? { Cookie: cookie } : {}),
-      },
-      timeout: 15000,
-    });
+
+    // 拉取当前页，最多重试 5 次（每次遇到 bot 页就等，等到了继续）
+    let html = '';
+    let success = false;
+    for (let attempt = 0; attempt < 5; attempt++) {
+      try {
+        const resp = await axios.get(url, {
+          headers: {
+            'User-Agent': UA,
+            Accept:
+              'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',
+            'Accept-Language': 'zh-CN,zh;q=0.9,en;q=0.8',
+            ...(cookie ? { Cookie: cookie } : {}),
+          },
+          timeout: 15000,
+        });
+        const body: string = resp.data;
+
+        if (isBotPage(body)) {
+          const waitMs = 3000 * (attempt + 1); // 3s, 6s, 9s, 12s, 15s
+          console.warn(
+            `[fetchAllMySubmissions] 第 ${page} 页第 ${attempt + 1}/5 次遇到 WAF 反爬页（${body.length} 字节），等 ${waitMs}ms 重试...`
+          );
+          await new Promise((r) => setTimeout(r, waitMs));
+          continue;
+        }
+
+        html = body;
+        success = true;
+        break;
+      } catch (e: any) {
+        const status = e && e.response ? e.response.status : '(网络错误)';
+        console.warn(
+          `[fetchAllMySubmissions] 第 ${page} 页第 ${attempt + 1}/5 次失败: ${status}，等 3s 重试...`
+        );
+        await new Promise((r) => setTimeout(r, 3000));
+      }
+    }
+
+    if (!success) {
+      console.error(
+        `[fetchAllMySubmissions] 第 ${page} 页 5 次都失败，跳过这页继续。累计 ${all.length} 条`
+      );
+      consecutiveBotPages++;
+      if (consecutiveBotPages >= 3) {
+        console.error(
+          `[fetchAllMySubmissions] 连续 3 页失败，可能被 WAF 长时间封了，终止`
+        );
+        break;
+      }
+      // 跳过这页：尝试从当前 HTML 里拿 next，拿不到就终止
+      // 由于没有成功拿到 html，这里只能终止
+      // （或者向前走无法推进，只能 break）
+      break;
+    }
+    consecutiveBotPages = 0;
 
     const $ = cheerio.load(html);
 
+    const isLoginPage =
+      html.includes('/auth/login') && !html.includes('solutions-tbody');
+    if (isLoginPage) {
+      console.error(
+        `[fetchAllMySubmissions] 第 ${page} 页返回登录页，Cookie 可能失效，终止`
+      );
+      break;
+    }
+
+    let rowCount = 0;
     $('#solutions-tbody > tr').each((_, tr) => {
       const tds = $(tr).find('td');
       if (tds.length < 9) return;
-
       const id = parseInt(tds.eq(0).text().trim(), 10);
       if (!id || seen.has(id)) return;
       seen.add(id);
-
       all.push({
         id,
         userDisplay:
@@ -613,22 +751,53 @@ export async function fetchAllMySubmissions(
         length: tds.eq(7).text().trim(),
         submitTime: tds.eq(8).text().trim(),
       });
+      rowCount++;
     });
+
+    if (page <= 3 || page % 10 === 0) {
+      console.log(
+        `[fetchAllMySubmissions] 第 ${page} 页: ${rowCount} 行, 累计 ${all.length}`
+      );
+    }
+
+    if (rowCount === 0) {
+      console.log(
+        `[fetchAllMySubmissions] 第 ${page} 页 0 行，终止`
+      );
+      break;
+    }
 
     onProgress?.(page, all.length);
 
-    // cursor 分页：跟进 rel="next"
     const next = $('a[rel="next"]').attr('href');
-    if (!next) break;
+    if (!next) {
+      console.log(
+        `[fetchAllMySubmissions] 第 ${page} 页无 rel="next"，终止。累计 ${all.length}`
+      );
+      break;
+    }
     url = next.startsWith('http') ? next : `${BASE_URL}${next}`;
 
-    await new Promise((r) => setTimeout(r, 200));
+    // 页间隔拉长到 800ms，减少 WAF 触发概率
+    await new Promise((r) => setTimeout(r, 800));
   }
 
+  console.log(
+    `[fetchAllMySubmissions] 完成，共 ${all.length} 条，${page} 页`
+  );
   return all;
 }
 
 /** 从提交列表构建「题目名 → 最高分」映射 */
+function normalizeTitle(s: string): string {
+  return s
+    .replace(/\u00a0/g, ' ')      // 不间断空格
+    .replace(/\u3000/g, ' ')      // 全角空格
+    .replace(/[\u200b-\u200f]/g, '') // 零宽字符
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
 export function buildScoreIndex(
   subs: SubmissionSummary[]
 ): Map<string, number> {
@@ -636,11 +805,14 @@ export function buildScoreIndex(
   for (const s of subs) {
     const score = parseFloat(s.score);
     if (isNaN(score)) continue;
-    const prev = map.get(s.problemTitle) ?? -1;
-    if (score > prev) map.set(s.problemTitle, score);
+    const key = normalizeTitle(s.problemTitle);
+    const prev = map.get(key) ?? -1;
+    if (score > prev) map.set(key, score);
   }
   return map;
 }
+
+export { normalizeTitle };
 export interface DashboardData {
   homeworks: { title: string; url: string; current: number; total: number }[];
   history: {
@@ -656,7 +828,7 @@ export interface DashboardData {
 export async function fetchDashboard(cookie?: string): Promise<DashboardData> {
   const { data: html } = await axios.get(`${BASE_URL}/`, {
     headers: {
-      'User-Agent': 'VSCode-WZOI-Extension/0.0.1',
+      'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
       ...(cookie ? { Cookie: cookie } : {}),
     },
     timeout: 15000,
@@ -733,7 +905,7 @@ export interface TagInfo {
 
 export async function fetchTags(): Promise<TagInfo[]> {
   const { data: html } = await axios.get(`${BASE_URL}/`, {
-    headers: { 'User-Agent': 'VSCode-WZOI-Extension/0.0.1' },
+    headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36' },
     timeout: 15000,
   });
   const $ = cheerio.load(html);
@@ -820,7 +992,7 @@ export async function searchProblems(
 
     const { data: html } = await axios.get(url, {
       headers: {
-        'User-Agent': 'VSCode-WZOI-Extension/0.0.1',
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
         ...(cookie ? { Cookie: cookie } : {}),
       },
       timeout: 15000,
@@ -883,7 +1055,7 @@ export async function searchUsers(
 
   const { data: html } = await axios.get(url, {
     headers: {
-      'User-Agent': 'VSCode-WZOI-Extension/0.0.1',
+      'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
       ...(cookie ? { Cookie: cookie } : {}),
     },
     timeout: 15000,
@@ -946,7 +1118,7 @@ async function fetchImageAsDataUri(
     }
     const resp = await axios.get(full, {
       headers: {
-        'User-Agent': 'VSCode-WZOI-Extension/0.0.1',
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
         'Referer': 'https://wzoi.cn/',
         ...(cookie ? { Cookie: cookie } : {}),
       },
@@ -968,7 +1140,7 @@ export async function fetchUserProfile(
   const url = `${BASE_URL}/users/${uid}`;
   const { data: html } = await axios.get(url, {
     headers: {
-      'User-Agent': 'VSCode-WZOI-Extension/0.0.1',
+      'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
       ...(cookie ? { Cookie: cookie } : {}),
     },
     timeout: 15000,
@@ -1088,7 +1260,7 @@ export async function fetchUserSubmissions(
     page++;
     const { data: html } = await axios.get(url, {
       headers: {
-        'User-Agent': 'VSCode-WZOI-Extension/0.0.1',
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
         ...(cookie ? { Cookie: cookie } : {}),
       },
       timeout: 15000,
@@ -1162,7 +1334,7 @@ export async function fetchRanklist(
   const url = `${BASE_URL}/s/${problemsetId}/ranklist`;
   const { data: html } = await axios.get(url, {
     headers: {
-      'User-Agent': 'VSCode-WZOI-Extension/0.0.1',
+      'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
       ...(cookie ? { Cookie: cookie } : {}),
     },
     timeout: 15000,
@@ -1219,4 +1391,118 @@ export async function fetchRanklist(
   });
 
   return { problemsetId, title, problems, rows };
+}
+
+export interface ProblemsetSummary {
+  id: string;
+  title: string;
+}
+
+export async function fetchAllProblemsets(
+  cookie?: string
+): Promise<ProblemsetSummary[]> {
+  const { data: html } = await axios.get(`${BASE_URL}/s`, {
+    headers: {
+      'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
+      ...(cookie ? { Cookie: cookie } : {}),
+    },
+    timeout: 15000,
+  });
+  const $ = cheerio.load(html);
+  const list: ProblemsetSummary[] = [];
+  const seen = new Set<string>();
+  $('a[href]').each((_, el) => {
+    const href = $(el).attr('href') ?? '';
+    const m = href.match(/^\/s\/(\d+)\/?$/);
+    if (!m) return;
+    const id = m[1];
+    if (seen.has(id)) return;
+    const title = $(el).text().trim();
+    if (!title || /^\d+$/.test(title) || title.length < 2) return;
+    seen.add(id);
+    list.push({ id, title });
+  });
+  return list;
+}
+
+
+export interface ProblemStats {
+  submitCount?: number;
+  passRate?: string;
+  avgScore?: string;
+}
+
+export async function fetchProblemStats(
+  problemsetId: string,
+  problemId: string,
+  cookie?: string
+): Promise<ProblemStats> {
+  const url = `${BASE_URL}/s/${problemsetId}/${problemId}`;
+  const { data: html } = await axios.get(url, {
+    headers: {
+      'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
+      ...(cookie ? { Cookie: cookie } : {}),
+    },
+    timeout: 15000,
+  });
+  const $ = cheerio.load(html);
+  const small = $('.w-100.text-center small').first().text().trim();
+  if (!small) return {};
+  const submit = small.match(/提交数:\s*(\d+)/);
+  const rate = small.match(/通过率:\s*([\d.]+%)/);
+  const avg = small.match(/平均分:\s*([\d.]+)/);
+  return {
+    submitCount: submit ? parseInt(submit[1], 10) : undefined,
+    passRate: rate ? rate[1] : undefined,
+    avgScore: avg ? avg[1] : undefined,
+  };
+}
+
+
+/**
+ * 用题目名搜索，从结果里匹配目标 pid，取它的标签（精确反查）
+ */
+export async function searchTagsByPid(
+  title: string,
+  targetPid: string,
+  cookie?: string
+): Promise<{ id: string; name: string }[]> {
+  const params = new URLSearchParams();
+  params.append('name', title);
+  params.append('search_item', 'problems');
+  const url = `${BASE_URL}/search?${params.toString()}`;
+
+  const { data: html } = await axios.get(url, {
+    headers: {
+      'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
+      ...(cookie ? { Cookie: cookie } : {}),
+    },
+    timeout: 15000,
+  });
+
+  const $ = cheerio.load(html);
+  const matched: { id: string; name: string }[] = [];
+
+  $('table.table tbody tr').each((_, tr) => {
+    const tds = $(tr).find('td');
+    if (tds.length < 2) return;
+
+    const a = tds.eq(1).find('a[href^="/s/"]').first();
+    if (!a.length) return;
+    const href = a.attr('href') ?? '';
+    const m = href.match(/^\/s\/(\d+)\/(\d+)/);
+    if (!m) return;
+    if (m[2] !== targetPid) return;
+
+    tds.eq(1).find('a.openpop').each((_, tagEl) => {
+      const tagHref = $(tagEl).attr('href') ?? '';
+      const tagMatch = tagHref.match(/#tag-(\d+)/);
+      const tagName = $(tagEl).text().trim();
+      if (tagMatch && tagName && !matched.find((x) => x.id === tagMatch[1])) {
+        matched.push({ id: tagMatch[1], name: tagName });
+      }
+    });
+  });
+
+  return matched;
 }

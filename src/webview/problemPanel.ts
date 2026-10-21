@@ -1,5 +1,6 @@
 import * as vscode from 'vscode';
 import { Problem } from '../api/wzoi';
+import type { ProblemRecord } from '../indexer/problemIndexer';
 
 export class ProblemPanel {
   public static currentPanel: ProblemPanel | undefined;
@@ -48,7 +49,8 @@ export class ProblemPanel {
     extensionUri: vscode.Uri,
     problem: Problem,
     problemsetId: string,
-    output: vscode.OutputChannel
+    output: vscode.OutputChannel,
+    record?: ProblemRecord
   ): void {
     const column = vscode.window.activeTextEditor?.viewColumn;
 
@@ -58,7 +60,8 @@ export class ProblemPanel {
       ProblemPanel.currentPanel.panel.webview.html = render(
         problem,
         ProblemPanel.currentPanel.panel.webview,
-        ProblemPanel.currentPanel.extensionUri
+        ProblemPanel.currentPanel.extensionUri,
+        record
       );
       return;
     }
@@ -74,7 +77,7 @@ export class ProblemPanel {
       }
     );
 
-    panel.webview.html = render(problem, panel.webview, extensionUri);
+    panel.webview.html = render(problem, panel.webview, extensionUri, record);
     ProblemPanel.currentPanel = new ProblemPanel(panel, extensionUri, output);
   }
 }
@@ -126,7 +129,8 @@ function sanitizeHtml(html: string): string {
 function render(
   p: Problem,
   webview: vscode.Webview,
-  extensionUri: vscode.Uri
+  extensionUri: vscode.Uri,
+  record?: ProblemRecord
 ): string {
   const esc = (s: string) =>
     s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
@@ -269,6 +273,54 @@ function render(
   a { color: var(--accent); text-decoration: none; }
   a:hover { text-decoration: underline; }
   mjx-container { font-size: 1.05em; }
+
+  .extra-row {
+    display: flex;
+    justify-content: center;
+    align-items: center;
+    gap: 10px;
+    flex-wrap: wrap;
+    margin: -12px auto 16px;
+    max-width: 900px;
+    padding: 8px 16px;
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+  }
+  .extra-label {
+    color: var(--muted);
+    font-size: 13px;
+    font-weight: 600;
+    flex-shrink: 0;
+  }
+  .extra-content {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+    flex: 1;
+    justify-content: center;
+  }
+  .ps-chip {
+    display: inline-flex;
+    align-items: center;
+    padding: 2px 10px;
+    background: rgba(127,127,127,0.12);
+    border-radius: 12px;
+    font-size: 12px;
+  }
+  .ps-id {
+    margin-left: 4px;
+    color: var(--muted);
+    font-size: 10px;
+  }
+  .tag-chip {
+    display: inline-block;
+    padding: 2px 10px;
+    background: rgba(127,127,127,0.15);
+    border-radius: 12px;
+    font-size: 12px;
+    color: var(--accent);
+  }
   /* 富文本内容：还原 WZOI 题面的格式 */
   .content.rich { white-space: normal; }
   .content.rich p { margin: 8px 0; }
@@ -338,6 +390,24 @@ function render(
     <span class="meta-chip">时间限制<strong>${esc(p.timeLimit || '—')}</strong></span>
     <span class="meta-chip">空间限制<strong>${esc(p.memoryLimit || '—')}</strong></span>
   </div>
+
+  ${record && record.problemsets.length > 0 ? `<div class="extra-row">
+    <span class="extra-label">所属题库:</span>
+    <div class="extra-content">
+      ${record.problemsets
+        .map((ps) => `<span class="ps-chip">${esc(ps.title)}<span class="ps-id">#${esc(ps.id)}</span></span>`)
+        .join('')}
+    </div>
+  </div>` : ''}
+
+  ${record && record.tags.length > 0 ? `<div class="extra-row">
+    <span class="extra-label">算法标签:</span>
+    <div class="extra-content">
+      ${record.tags
+        .map((t) => `<span class="tag-chip">${esc(t.name)}</span>`)
+        .join('')}
+    </div>
+  </div>` : ''}
   <section>
     <h2>题目描述</h2>
     <div class="content rich">${renderRichText(p.description || '（无）')}</div>

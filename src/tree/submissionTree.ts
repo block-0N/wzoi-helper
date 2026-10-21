@@ -1,6 +1,6 @@
 import * as vscode from 'vscode';
 import {
-    fetchMySubmissions,
+    fetchAllMySubmissions,
     SubmissionSummary,
 } from '../api/wzoi';
 
@@ -65,10 +65,16 @@ export class SubmissionTreeProvider
                 {
                     location: vscode.ProgressLocation.Notification,
                     title: '加载提交记录...',
+                    cancellable: true,
                 },
-                () => fetchMySubmissions(username, cookie)
+                (progress, token) =>
+                    fetchAllMySubmissions(username, cookie, (page, count) => {
+                        progress.report({
+                            message: `第 ${page} 页 · 已加载 ${count} 条`,
+                        });
+                    })
             );
-            this.cache = list.slice(0, 30);
+            this.cache = list;
             if (!this.cache.length) {
                 return [new vscode.TreeItem('（没有提交记录）')];
             }

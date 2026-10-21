@@ -2,7 +2,7 @@
   "name": "wzoi-helper",
   "displayName": "wzoi-helper",
   "description": "WZOI 题目辅助工具",
-  "version": "1.3.1",
+  "version": "1.4.0",
   "publisher": "block-0N",
   "repository": {
     "type": "git",
@@ -130,6 +130,16 @@
       {
         "command": "wzoi-helper.openUser",
         "title": "WZOI: 打开用户主页"
+      },
+      {
+        "command": "wzoi-helper.buildProblemIndex",
+        "title": "WZOI: 构建题库索引",
+        "icon": "$(database)"
+      },
+      {
+        "command": "wzoi-helper.openProblemList",
+        "title": "WZOI: 打开题库列表",
+        "icon": "$(list-unordered)"
       }
     ],
     "menus": {
@@ -166,6 +176,16 @@
         },
         {
           "command": "wzoi-helper.search",
+          "when": "view == wzoiProblems",
+          "group": "navigation"
+        },
+        {
+          "command": "wzoi-helper.buildProblemIndex",
+          "when": "view == wzoiProblems",
+          "group": "1_export"
+        },
+        {
+          "command": "wzoi-helper.openProblemList",
           "when": "view == wzoiProblems",
           "group": "navigation"
         }
@@ -228,7 +248,48 @@
           "description": "本地测试默认时间限制（毫秒），未识别到题目限制时使用"
         }
       }
-    }
+    },
+    "keybindings": [
+      {
+        "command": "wzoi-helper.runTests",
+        "key": "ctrl+k f5",
+        "when": "editorTextFocus"
+      },
+      {
+        "command": "wzoi-helper.submitToProblem",
+        "key": "ctrl+alt+s",
+        "when": "editorTextFocus"
+      },
+      {
+        "command": "wzoi-helper.openProblemList",
+        "key": "ctrl+alt+l"
+      },
+      {
+        "command": "wzoi-helper.buildProblemIndex",
+        "key": "ctrl+alt+i"
+      },
+      {
+        "command": "wzoi-helper.syncACStatus",
+        "key": "ctrl+alt+r"
+      },
+      {
+        "command": "wzoi-helper.openDashboard",
+        "key": "ctrl+alt+t"
+      },
+      {
+        "command": "wzoi-helper.createWorkspace",
+        "key": "ctrl+alt+w"
+      },
+      {
+        "command": "wzoi-helper.loginPassword",
+        "key": "ctrl+alt+o"
+      },
+      {
+        "command": "wzoi-helper.search",
+        "key": "ctrl+alt+f",
+        "when": "editorTextFocus"
+      }
+    ]
   },
   "scripts": {
     "vscode:prepublish": "npm run package",
