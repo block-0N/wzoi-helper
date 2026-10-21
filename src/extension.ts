@@ -197,6 +197,8 @@ if (!pid) return;
   treeProvider.attachTreeView(treeView);
   // 从 globalState 恢复缓存的分数索引
   const SCORE_CACHE_KEY = 'wzoi.scoreIndex';
+const LAST_SYNC_KEY = 'wzoi.lastSyncTime';
+const SYNC_INTERVAL_MS = 30 * 60 * 1000;
   const cachedScores = context.globalState.get<[string, number][]>(SCORE_CACHE_KEY);
   if (cachedScores && cachedScores.length) {
     treeProvider.setScoreIndex(new Map(cachedScores));
@@ -430,7 +432,6 @@ if (!pid) return;
             () => submitSolution(ps.id, problemId, code, pick.id, cookie)
           );
           submittedIds.push({ psId: ps.id, psTitle: ps.label, solutionId: result.solutionId });
-          submissionProvider.refresh();
         } catch (err) {
           const fullMsg = String(err);
           // 完整错误写进 WZOI 输出通道（用户一定能看到）
@@ -476,8 +477,20 @@ if (!pid) return;
         }
       );
 
-      // 3) 无论是否取消，都刷新一次列表
-      submissionProvider.refresh();
+      // 3) 如果面板已打开过，插入新提交到缓存顶部
+      if (finalDetail && submissionProvider.hasCache()) {
+        submissionProvider.addLatest({
+          id: finalDetail.id,
+          userDisplay: finalDetail.userDisplay,
+          problemTitle: finalDetail.problemTitle,
+          score: finalDetail.score,
+          time: finalDetail.time,
+          memory: finalDetail.memory,
+          language: finalDetail.language,
+          length: finalDetail.length,
+          submitTime: finalDetail.submitTime,
+        });
+      }
 
       if (wasCancelled || !finalDetail) return;
 
@@ -607,6 +620,7 @@ if (!pid) return;
         SCORE_CACHE_KEY,
         Array.from(index.entries())
       );
+      await context.globalState.update(LAST_SYNC_KEY, Date.now());
 
       if (!silent) {
         vscode.window.showInformationMessage(
@@ -1179,9 +1193,12 @@ if (!pid) return;
     treeView, submissionView, contestView
   );
   // 启动后延迟 3 秒静默同步一次
-  setTimeout(() => {
-    syncACStatusInternal(true);
-  }, 3000);
+    const lastSyncAt = context.globalState.get<number>(LAST_SYNC_KEY) || 0;
+  if (Date.now() - lastSyncAt > SYNC_INTERVAL_MS) {
+    setTimeout(() => {
+        syncACStatusInternal(true);
+      }, 3000);
+  }
 
   // 启动后延迟 3 秒自动同步 AC 状态（后台静默）
   // (重复的启动同步已移除)

@@ -42,6 +42,16 @@ export class SubmissionTreeProvider
         private getUsername: () => Promise<string | undefined>
     ) { }
 
+
+    addLatest(summary: SubmissionSummary): void {
+        // 把新提交插入缓存顶部（去重）
+        this.cache = [summary, ...this.cache.filter((s) => s.id !== summary.id)];
+        this._onDidChangeTreeData.fire();
+    }
+
+    hasCache(): boolean {
+        return this.cache.length > 0;
+    }
     refresh(): void {
         this.cache = [];
         this._onDidChangeTreeData.fire();
