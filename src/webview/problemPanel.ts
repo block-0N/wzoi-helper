@@ -23,7 +23,7 @@ export class ProblemPanel {
     this.panel.webview.onDidReceiveMessage(
       (msg) => {
         if (msg?.type === 'revealInTree' && msg.pid) {
-          vscode.commands.executeCommand(
+vscode.commands.executeCommand(
             'wzoi-helper.revealInTree',
             String(msg.pid),
             msg.ps ? String(msg.ps) : undefined
@@ -198,7 +198,7 @@ function render(
     style-src 'unsafe-inline' ${webview.cspSource};
     script-src 'nonce-${nonce}' ${webview.cspSource} 'unsafe-eval' blob:;
     font-src ${webview.cspSource};
-    img-src https: data: https://wzoi.cn ${webview.cspSource};">
+    img-src https: data: ${webview.cspSource};">
 <style>
   :root {
     --fg: var(--vscode-foreground);
@@ -284,28 +284,20 @@ function render(
   a:hover { text-decoration: underline; }
   mjx-container { font-size: 1.05em; }
 
-  .action-bar {
-    display: flex;
-    justify-content: center;
-    gap: 8px;
-    margin: -8px auto 12px;
-  }
-  .action-btn {
-    padding: 5px 14px;
-    border: 1px solid var(--border);
-    background: var(--card);
-    color: var(--fg);
-    border-radius: 6px;
-    font-size: 13px;
+  .meta-chip-btn {
     cursor: pointer;
-    transition: background 0.15s, border-color 0.15s, color 0.15s;
+    background: var(--card);
+    border: 1px solid var(--border);
+    color: var(--accent);
     font-family: inherit;
+    font-size: 13px;
+    transition: background 0.15s, border-color 0.15s;
   }
-  .action-btn:hover {
+  .meta-chip-btn:hover {
     background: rgba(127,127,127,0.15);
     border-color: var(--accent);
-    color: var(--accent);
   }
+
 
   .extra-row {
     display: flex;
@@ -422,13 +414,11 @@ function render(
     <span class="meta-chip">题目 ID<strong>${esc(p.id)}</strong></span>
     <span class="meta-chip">时间限制<strong>${esc(p.timeLimit || '—')}</strong></span>
     <span class="meta-chip">空间限制<strong>${esc(p.memoryLimit || '—')}</strong></span>
-  </div>
-
-  <div class="action-bar">
-    <button class="action-btn" id="reveal-in-tree"
+    <button class="meta-chip meta-chip-btn" id="reveal-in-tree"
       data-pid="${esc(p.id)}"
-      data-ps="${esc(problemsetId)}">
-      在侧边栏打开
+      data-ps="${esc(problemsetId)}"
+      title="在侧边栏中定位此题">
+      ☰ 在侧边栏打开
     </button>
   </div>
 
@@ -490,26 +480,47 @@ function render(
   <script nonce="${nonce}" src="${mathjaxUri}"></script>
   <script nonce="${nonce}">
     (function() {
+      let vscode;
+      try {
+        vscode = acquireVsCodeApi();
+        window.__vscodeApi = vscode;
+      } catch (e) {
+        vscode = window.__vscodeApi;
+        if (!vscode) {
+          return;
+        }
+      }
 
       // 在侧边栏打开按钮
       const revealBtn = document.getElementById('reveal-in-tree');
       if (revealBtn) {
         revealBtn.addEventListener('click', () => {
-          vscode.postMessage({
+  try {
+            vscode.postMessage({
             type: 'revealInTree',
             pid: revealBtn.getAttribute('data-pid'),
             ps: revealBtn.getAttribute('data-ps'),
-          });
+            });
+          } catch (e) {
+            console.error('postMessage failed:', e);
+          }
         });
       }
 
       // 修正题目里相对路径的图片（WZOI 常用 ../../files/... 形式）
       document.querySelectorAll('.content img').forEach((img) => {
-        const src = img.getAttribute('src');
-        if (!src) return;
-        if (/^(https?:)?\/\//i.test(src) || src.startsWith('data:')) return;
-        img.src = 'https://wzoi.cn/' + src.replace(/^(\.\.\/)+/, '').replace(/^\//, '');
-      });
+        const s = img.getAttribute('src');
+        if (!s) return;
+        if (s.startsWith('http://') || s.startsWith('https://') || s.startsWith('//') || s.startsWith('data:')) return;
+        let p = s;
+        while (p.startsWith('../')) {
+          p = p.slice(3);
+        }
+        if (p.startsWith('/')) {
+          p = p.slice(1);
+        }
+        img.src = 'https://wzoi.cn/' + p;
+      })
       document.querySelectorAll('.copy-btn').forEach((btn) => {
         btn.addEventListener('click', () => {
           const text = decodeURIComponent(btn.getAttribute('data-copy'));
@@ -530,7 +541,6 @@ function render(
     })();
   </script>
   <script nonce="${nonce}" src="${hljsJs}"></script>
-</body>
 </body>
 </html>`;
 }

@@ -126,7 +126,7 @@ export function activate(context: vscode.ExtensionContext) {
   const revealInTree = vscode.commands.registerCommand(
     'wzoi-helper.revealInTree',
     async (pid: string, currentProblemsetId?: string) => {
-      if (!pid) return;
+if (!pid) return;
       const idx = await getCachedIndex(context);
       const rec = idx?.problems.find((x) => x.pid === pid);
       let targetPs: string | undefined;
