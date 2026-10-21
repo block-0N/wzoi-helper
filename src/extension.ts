@@ -122,9 +122,72 @@ export function activate(context: vscode.ExtensionContext) {
         ProblemListPanel.createOrShow(context.extensionUri, context.globalStorageUri, dataUri, scoreUri);
       }
     );
+  // ---------- 命令：在侧边栏定位题目 ----------
+  const revealInTree = vscode.commands.registerCommand(
+    'wzoi-helper.revealInTree',
+    async (pid: string, currentProblemsetId?: string) => {
+      if (!pid) return;
+      const idx = await getCachedIndex(context);
+      const rec = idx?.problems.find((x) => x.pid === pid);
+      let targetPs: string | undefined;
+      let targetTitle = '';
+
+      if (rec && rec.problemsets.length > 0) {
+        if (rec.problemsets.length === 1) {
+          targetPs = rec.problemsets[0].id;
+          targetTitle = rec.problemsets[0].title;
+        } else {
+          const pick = await vscode.window.showQuickPick(
+            rec.problemsets.map((ps) => ({
+              label: ps.title,
+              description: '题库 ' + ps.id,
+              id: ps.id,
+            })),
+            {
+              placeHolder: '该题属于 ' + rec.problemsets.length + ' 个题库，选择要定位的',
+            }
+          );
+          if (!pick) return;
+          targetPs = pick.id;
+          targetTitle = pick.label;
+        }
+      } else {
+        targetPs = currentProblemsetId;
+      }
+
+      if (!targetPs) {
+        vscode.window.showWarningMessage('无法确定题目所属题库');
+        return;
+      }
+
+      const cfg = vscode.workspace.getConfiguration('wzoi');
+      const configuredIds = cfg.get<string[]>('problemsets') ?? [];
+      if (!configuredIds.includes(targetPs)) {
+        const msg = '题库 ' + targetPs + (targetTitle ? '（' + targetTitle + '）' : '') + ' 不在侧边栏配置中，是否加入？';
+        const action = await vscode.window.showWarningMessage(msg, '加入', '取消');
+        if (action !== '加入') return;
+        await cfg.update(
+          'problemsets',
+          [...configuredIds, targetPs],
+          vscode.ConfigurationTarget.Global
+        );
+        treeProvider.refresh();
+        await new Promise((r) => setTimeout(r, 500));
+      }
+
+      const ok = await treeProvider.revealProblem(targetPs, pid);
+      if (ok) {
+        vscode.commands.executeCommand('wzoiProblems.focus');
+      } else {
+        vscode.window.showWarningMessage('题库 ' + targetPs + ' 中未找到题目 ' + pid);
+      }
+    }
+  );
 
 
-  context.subscriptions.push(wzoiOutput, buildProblemIndex, openProblemList);
+
+
+  context.subscriptions.push(wzoiOutput, buildProblemIndex, openProblemList, revealInTree);
   wzoiOutput.appendLine('WZOI 扩展已激活');
   // ---------- Providers ----------
   const treeProvider = new ProblemTreeProvider(getCookie);

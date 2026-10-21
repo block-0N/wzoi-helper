@@ -110,6 +110,44 @@ export class ProblemTreeProvider implements vscode.TreeDataProvider<Node> {
         }
     }
 
+  async revealProblem(problemsetId: string, problemId: string): Promise<boolean> {
+    await this.getChildren();
+    const psNode = this.nodes.get(problemsetId);
+    if (!psNode) return false;
+
+    const pages = (await this.getChildren(psNode)) as PageNode[];
+
+    return vscode.window.withProgress(
+      {
+        location: vscode.ProgressLocation.Notification,
+        title: '定位题目 ' + problemId + '...',
+        cancellable: false,
+      },
+      async (progress) => {
+        for (let idx = 0; idx < pages.length; idx++) {
+          const pageNode = pages[idx];
+          progress.report({
+            message: '第 ' + pageNode.page + '/' + pages.length + ' 页',
+            increment: 100 / pages.length,
+          });
+          const problems = (await this.getChildren(pageNode)) as ProblemNode[];
+          const target = problems.find((p) => p.summary.problemId === problemId);
+          if (target) {
+            if (this.treeView) {
+              await this.treeView.reveal(target, {
+                expand: true,
+                focus: true,
+                select: true,
+              });
+            }
+            return true;
+          }
+        }
+        return false;
+      }
+    );
+  }
+
     async getChildren(element?: Node): Promise<Node[]> {
         // ---- 顶层：题库列表 ----
         if (!element) {

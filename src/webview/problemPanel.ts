@@ -22,6 +22,14 @@ export class ProblemPanel {
     this.panel.onDidDispose(() => this.dispose(), null, this.disposables);
     this.panel.webview.onDidReceiveMessage(
       (msg) => {
+        if (msg?.type === 'revealInTree' && msg.pid) {
+          vscode.commands.executeCommand(
+            'wzoi-helper.revealInTree',
+            String(msg.pid),
+            msg.ps ? String(msg.ps) : undefined
+          );
+          return;
+        }
         if (msg?.type === 'copy') {
           vscode.env.clipboard.writeText(String(msg.text ?? ''));
           vscode.window.setStatusBarMessage('已复制到剪贴板', 1500);
@@ -61,6 +69,7 @@ export class ProblemPanel {
         problem,
         ProblemPanel.currentPanel.panel.webview,
         ProblemPanel.currentPanel.extensionUri,
+        problemsetId,
         record
       );
       return;
@@ -77,7 +86,7 @@ export class ProblemPanel {
       }
     );
 
-    panel.webview.html = render(problem, panel.webview, extensionUri, record);
+    panel.webview.html = render(problem, panel.webview, extensionUri, problemsetId, record);
     ProblemPanel.currentPanel = new ProblemPanel(panel, extensionUri, output);
   }
 }
@@ -130,6 +139,7 @@ function render(
   p: Problem,
   webview: vscode.Webview,
   extensionUri: vscode.Uri,
+  problemsetId: string,
   record?: ProblemRecord
 ): string {
   const esc = (s: string) =>
@@ -274,6 +284,29 @@ function render(
   a:hover { text-decoration: underline; }
   mjx-container { font-size: 1.05em; }
 
+  .action-bar {
+    display: flex;
+    justify-content: center;
+    gap: 8px;
+    margin: -8px auto 12px;
+  }
+  .action-btn {
+    padding: 5px 14px;
+    border: 1px solid var(--border);
+    background: var(--card);
+    color: var(--fg);
+    border-radius: 6px;
+    font-size: 13px;
+    cursor: pointer;
+    transition: background 0.15s, border-color 0.15s, color 0.15s;
+    font-family: inherit;
+  }
+  .action-btn:hover {
+    background: rgba(127,127,127,0.15);
+    border-color: var(--accent);
+    color: var(--accent);
+  }
+
   .extra-row {
     display: flex;
     justify-content: center;
@@ -391,6 +424,14 @@ function render(
     <span class="meta-chip">空间限制<strong>${esc(p.memoryLimit || '—')}</strong></span>
   </div>
 
+  <div class="action-bar">
+    <button class="action-btn" id="reveal-in-tree"
+      data-pid="${esc(p.id)}"
+      data-ps="${esc(problemsetId)}">
+      在侧边栏打开
+    </button>
+  </div>
+
   ${record && record.problemsets.length > 0 ? `<div class="extra-row">
     <span class="extra-label">所属题库:</span>
     <div class="extra-content">
@@ -449,7 +490,18 @@ function render(
   <script nonce="${nonce}" src="${mathjaxUri}"></script>
   <script nonce="${nonce}">
     (function() {
-      const vscode = acquireVsCodeApi();
+
+      // 在侧边栏打开按钮
+      const revealBtn = document.getElementById('reveal-in-tree');
+      if (revealBtn) {
+        revealBtn.addEventListener('click', () => {
+          vscode.postMessage({
+            type: 'revealInTree',
+            pid: revealBtn.getAttribute('data-pid'),
+            ps: revealBtn.getAttribute('data-ps'),
+          });
+        });
+      }
 
       // 修正题目里相对路径的图片（WZOI 常用 ../../files/... 形式）
       document.querySelectorAll('.content img').forEach((img) => {

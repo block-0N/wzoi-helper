@@ -2,7 +2,7 @@
   "name": "wzoi-helper",
   "displayName": "wzoi-helper",
   "description": "WZOI 题目辅助工具",
-  "version": "1.4.0",
+  "version": "1.5.0",
   "publisher": "block-0N",
   "repository": {
     "type": "git",
@@ -140,6 +140,10 @@
         "command": "wzoi-helper.openProblemList",
         "title": "WZOI: 打开题库列表",
         "icon": "$(list-unordered)"
+      },
+      {
+        "command": "wzoi-helper.revealInTree",
+        "title": "WZOI: 在侧边栏定位题目"
       }
     ],
     "menus": {
