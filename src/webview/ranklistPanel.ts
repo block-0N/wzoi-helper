@@ -209,11 +209,18 @@ function render(data: Ranklist): string {
     background: var(--card);
     z-index: 1;
     font-weight: 600;
+    width: 56px;
+    min-width: 56px;
+    max-width: 56px;
+    box-sizing: border-box;
+    padding-left: 4px;
+    padding-right: 4px;
+    text-align: center;
   }
   th:first-child { z-index: 3; background: rgba(127,127,127,0.15); }
   td.user-cell, th:nth-child(2) {
     position: sticky;
-    left: 48px;
+    left: 56px;
     background: var(--card);
     z-index: 1;
     text-align: left;

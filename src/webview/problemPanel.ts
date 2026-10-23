@@ -22,6 +22,14 @@ export class ProblemPanel {
     this.panel.onDidDispose(() => this.dispose(), null, this.disposables);
     this.panel.webview.onDidReceiveMessage(
       (msg) => {
+        if (msg?.type === 'openHistory' && msg.pid) {
+          vscode.commands.executeCommand(
+            'wzoi-helper.openProblemHistory',
+            msg.ps ? String(msg.ps) : undefined,
+            String(msg.pid)
+          );
+          return;
+        }
         if (msg?.type === 'revealInTree' && msg.pid) {
 vscode.commands.executeCommand(
             'wzoi-helper.revealInTree',
@@ -420,6 +428,12 @@ function render(
       title="在侧边栏中定位此题">
       ☰ 在侧边栏打开
     </button>
+    <button class="meta-chip meta-chip-btn" id="open-history"
+      data-pid="${esc(p.id)}"
+      data-ps="${esc(problemsetId)}"
+      title="查看我的历史提交">
+      🕘 历史提交
+    </button>
   </div>
 
   ${record && record.problemsets.length > 0 ? `<div class="extra-row">
@@ -492,6 +506,21 @@ function render(
       }
 
       // 在侧边栏打开按钮
+      const historyBtn = document.getElementById('open-history');
+      if (historyBtn) {
+        historyBtn.addEventListener('click', () => {
+          try {
+            vscode.postMessage({
+              type: 'openHistory',
+              pid: historyBtn.getAttribute('data-pid'),
+              ps: historyBtn.getAttribute('data-ps'),
+            });
+          } catch (e) {
+            console.error('openHistory postMessage failed:', e);
+          }
+        });
+      }
+
       const revealBtn = document.getElementById('reveal-in-tree');
       if (revealBtn) {
         revealBtn.addEventListener('click', () => {

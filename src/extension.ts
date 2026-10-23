@@ -183,11 +183,55 @@ if (!pid) return;
       }
     }
   );
+  // ---------- 命令：查看题目历史提交 ----------
+  const openProblemHistory = vscode.commands.registerCommand(
+    'wzoi-helper.openProblemHistory',
+    async (problemsetId: string | undefined, problemId: string) => {
+      const username = await getUsername();
+      if (!username) {
+        vscode.window.showWarningMessage('请先登录 WZOI');
+        return;
+      }
+      const cookie = await getCookie();
+      if (!cookie) {
+        vscode.window.showWarningMessage('登录状态丢失，请重新登录');
+        return;
+      }
+      const title = `我在题目 ${problemId} 的提交`;
+      try {
+        const filters: import('./api/wzoi').SubmissionFilters = {
+          userName: username,
+          problemId,
+          problemsetId: problemsetId || undefined,
+        };
+        const items = await vscode.window.withProgress(
+          {
+            location: vscode.ProgressLocation.Notification,
+            title: `加载 ${title}...`,
+            cancellable: true,
+          },
+          (progress, token) =>
+            fetchUserSubmissions(filters, cookie, (page, count) => {
+              progress.report({ message: `第 ${page} 页 · 已加载 ${count} 条` });
+            })
+        );
+        if (!items.length) {
+          vscode.window.showInformationMessage('这道题还没有提交记录');
+          return;
+        }
+        SubmissionListPanel.createOrShow(title, items);
+      } catch (err) {
+        vscode.window.showErrorMessage(`加载失败: ${err}`);
+      }
+    }
+  );
 
 
 
 
-  context.subscriptions.push(wzoiOutput, buildProblemIndex, openProblemList, revealInTree);
+
+
+  context.subscriptions.push(wzoiOutput, buildProblemIndex, openProblemList, revealInTree, openProblemHistory);
   wzoiOutput.appendLine('WZOI 扩展已激活');
   // ---------- Providers ----------
   const treeProvider = new ProblemTreeProvider(getCookie);
