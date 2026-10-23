@@ -116,7 +116,7 @@ async function parseProblem(
     }
     return [t];
   };
-  
+
   const sampleInputs: string[] = [];
   const sampleOutputs: string[] = [];
   const samplePres = container.find('pre.sample_io').toArray();
@@ -1505,4 +1505,194 @@ export async function searchTagsByPid(
   });
 
   return matched;
+}
+
+
+/**
+ * 降级方案：从提交记录页统计某题的提交数和通过率。
+ * 用于比赛题目（详情页没有 <small> 展示统计）。
+ */
+export async function computeStatsFromSubmissions(
+  problemsetId: string,
+  problemId: string,
+  cookie?: string
+): Promise<ProblemStats> {
+  const params = new URLSearchParams();
+  params.append('problemset_id', problemsetId);
+  params.append('problem_id', problemId);
+
+  let url: string | undefined = `${BASE_URL}/solutions?${params.toString()}`;
+  let page = 0;
+  let total = 0;
+  let acCount = 0;
+  const MAX_PAGES = 50; // 1000 条上限，防止极端刷题者
+
+  const UA =
+    'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36';
+
+  const isBotPage = (html: string) =>
+    html.length < 3000 && (html.includes('EO_Bot_Ssid') || html.includes('_0x'));
+
+  while (url && page < MAX_PAGES) {
+    page++;
+
+    let html = '';
+    let success = false;
+    for (let attempt = 0; attempt < 3; attempt++) {
+      try {
+        const resp = await axios.get(url, {
+          headers: {
+            'User-Agent': UA,
+            'Accept-Language': 'zh-CN,zh;q=0.9',
+            ...(cookie ? { Cookie: cookie } : {}),
+          },
+          timeout: 15000,
+        });
+        if (isBotPage(resp.data)) {
+          await new Promise((r) => setTimeout(r, 3000 * (attempt + 1)));
+          continue;
+        }
+        html = resp.data;
+        success = true;
+        break;
+      } catch {
+        await new Promise((r) => setTimeout(r, 2000));
+      }
+    }
+
+    if (!success) break;
+
+    const $ = cheerio.load(html);
+    const rows = $('#solutions-tbody > tr');
+    if (rows.length === 0) break;
+
+    rows.each((_, tr) => {
+      const tds = $(tr).find('td');
+      if (tds.length < 9) return;
+      total++;
+      const score = parseFloat(tds.eq(3).text().trim());
+      if (!isNaN(score) && score >= 100) acCount++;
+    });
+
+    const next = $('a[rel="next"]').attr('href');
+    if (!next) break;
+    url = next.startsWith('http') ? next : `${BASE_URL}${next}`;
+
+    await new Promise((r) => setTimeout(r, 500));
+  }
+
+  if (total === 0) return {};
+
+  return {
+    submitCount: total,
+    passRate: `${((acCount / total) * 100).toFixed(2)}%`,
+  };
+}
+
+export interface DashboardStats {
+  totalProblems: number;
+  acProblems: number;
+  attemptedProblems: number;
+  unattemptedProblems: number;
+  passRate: number; // 0~100
+  byTag: { name: string; total: number; ac: number }[];
+  byProblemset: { id: string; title: string; total: number; ac: number }[];
+  recentDays: { date: string; count: number }[]; // 近 7 天
+}
+
+/**
+ * 根据题目索引和分数索引计算做题统计
+ */
+export function computeDashboardStats(
+  problems: {
+    pid: string;
+    title: string;
+    tags: { id: string; name: string }[];
+    problemsets: { id: string; title: string }[];
+  }[],
+  scoreIndex: Map<string, number>,
+  submissions?: { submitTime: string }[]
+): DashboardStats {
+  const norm = (s: string) =>
+    String(s)
+      .replace(/\u00a0/g, ' ')
+      .replace(/\u3000/g, ' ')
+      .replace(/[\u200b-\u200f]/g, '')
+      .replace(/\s+/g, ' ')
+      .trim();
+
+  let ac = 0;
+  let attempted = 0;
+
+  const tagMap = new Map<string, { total: number; ac: number }>();
+  const psMap = new Map<string, { title: string; total: number; ac: number }>();
+
+  for (const p of problems) {
+    const score = scoreIndex.get(norm(p.title));
+    const isAc = score !== undefined && score >= 100;
+    const isAttempted = score !== undefined;
+
+    if (isAc) ac++;
+    if (isAttempted) attempted++;
+
+    for (const t of p.tags || []) {
+      const e = tagMap.get(t.id) || { total: 0, ac: 0 };
+      e.total++;
+      if (isAc) e.ac++;
+      tagMap.set(t.id, e);
+    }
+    for (const ps of p.problemsets || []) {
+      const e = psMap.get(ps.id) || { title: ps.title, total: 0, ac: 0 };
+      e.total++;
+      if (isAc) e.ac++;
+      psMap.set(ps.id, e);
+    }
+  }
+
+  // 标签：按总题数降序，Top 20
+  const tagNames = new Map<string, string>();
+  for (const p of problems) {
+    for (const t of p.tags || []) tagNames.set(t.id, t.name);
+  }
+  const byTag = Array.from(tagMap.entries())
+    .map(([id, v]) => ({ name: tagNames.get(id) || id, ...v }))
+    .filter((x) => x.total > 0)
+    .sort((a, b) => b.total - a.total)
+    .slice(0, 20);
+
+  // 题库：按总题数降序
+  const byProblemset = Array.from(psMap.entries())
+    .map(([id, v]) => ({ id, ...v }))
+    .sort((a, b) => b.total - a.total);
+
+  // 近 7 天提交数
+  const recentDays: { date: string; count: number }[] = [];
+  if (submissions && submissions.length) {
+    const today = new Date();
+    today.setHours(0, 0, 0, 0);
+    const dayMap = new Map<string, number>();
+    for (const s of submissions) {
+      const d = s.submitTime.split(' ')[0]; // 'YYYY-MM-DD'
+      dayMap.set(d, (dayMap.get(d) || 0) + 1);
+    }
+    for (let i = 6; i >= 0; i--) {
+      const d = new Date(today.getTime() - i * 86400000);
+      const key = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+      recentDays.push({ date: key, count: dayMap.get(key) || 0 });
+    }
+  }
+
+  const totalProblems = problems.length;
+  const passRate = totalProblems > 0 ? (ac / totalProblems) * 100 : 0;
+
+  return {
+    totalProblems,
+    acProblems: ac,
+    attemptedProblems: attempted,
+    unattemptedProblems: totalProblems - attempted,
+    passRate,
+    byTag,
+    byProblemset,
+    recentDays,
+  };
 }

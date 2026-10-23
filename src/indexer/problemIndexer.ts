@@ -5,6 +5,7 @@ import {
   fetchContests,
   fetchProblemStats,
   searchTagsByPid,
+  computeStatsFromSubmissions,
 } from '../api/wzoi';
 
 export interface ProblemRecord {
@@ -160,7 +161,7 @@ export async function buildIndex(
     progress.report({ message: `[补全] 共 ${tasks.length} 道题需要补全...` });
   }
 
-  const CONCURRENCY = 3;
+  const CONCURRENCY = 2;
   let done = 0;
   let cursor = 0;
   let statsFixed = 0;
@@ -182,12 +183,23 @@ export async function buildIndex(
         try {
           const ps = r.problemsets[0];
           if (ps) {
+            // 1) 先试详情页
             const stats = await fetchProblemStats(ps.id, r.pid, cookie);
-            if (stats.submitCount !== undefined) {
+            if (stats.submitCount !== undefined && stats.passRate) {
               r.submitCount = stats.submitCount;
+              r.passRate = stats.passRate;
               statsFixed++;
+            } else {
+              // 2) 降级：从提交记录页统计（比赛题没有 <small>）
+              console.log(`[Index] 题目 ${r.pid} 详情页无 stats，降级从提交记录统计...`);
+              const fallback = await computeStatsFromSubmissions(ps.id, r.pid, cookie);
+              if (fallback.submitCount !== undefined) {
+                r.submitCount = fallback.submitCount;
+                r.passRate = fallback.passRate;
+                statsFixed++;
+                console.log(`[Index] 题目 ${r.pid} 降级补全成功: 提交 ${fallback.submitCount}, 通过率 ${fallback.passRate}`);
+              }
             }
-            if (stats.passRate) r.passRate = stats.passRate;
           }
         } catch (e) {
           console.error(`补全 stats 失败 ${r.pid}:`, e);
