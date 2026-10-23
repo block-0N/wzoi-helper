@@ -31,7 +31,7 @@ export class ProblemPanel {
           return;
         }
         if (msg?.type === 'revealInTree' && msg.pid) {
-vscode.commands.executeCommand(
+          vscode.commands.executeCommand(
             'wzoi-helper.revealInTree',
             String(msg.pid),
             msg.ps ? String(msg.ps) : undefined
@@ -354,6 +354,15 @@ function render(
     font-size: 12px;
     color: var(--accent);
   }
+  .source-chip {
+    display: inline-block;
+    padding: 2px 10px;
+    background: rgba(127,127,127,0.08);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    font-size: 12px;
+    color: var(--muted);
+  }
   /* 富文本内容：还原 WZOI 题面的格式 */
   .content.rich { white-space: normal; }
   .content.rich p { margin: 8px 0; }
@@ -451,6 +460,12 @@ function render(
       ${record.tags
         .map((t) => `<span class="tag-chip">${esc(t.name)}</span>`)
         .join('')}
+    </div>
+  </div>` : ''}
+  ${record && record.source ? `<div class="extra-row">
+    <span class="extra-label">来源:</span>
+    <div class="extra-content">
+      <span class="source-chip">${esc(record.source)}</span>
     </div>
   </div>` : ''}
   <section>

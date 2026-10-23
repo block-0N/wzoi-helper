@@ -75,8 +75,9 @@ function render(
   dataUri: vscode.Uri,
   scoreUri: vscode.Uri
 ): string {
-  const dataWebUri = webview.asWebviewUri(dataUri).toString();
-  const scoreWebUri = webview.asWebviewUri(scoreUri).toString();
+  const bust = '?t=' + Date.now();
+  const dataWebUri = webview.asWebviewUri(dataUri).toString() + bust;
+  const scoreWebUri = webview.asWebviewUri(scoreUri).toString() + bust;
   const nonce = makeNonce();
 
   return `<!DOCTYPE html>
@@ -174,6 +175,15 @@ function render(
   .rate-text { font-size: 12px; color: var(--muted); }
   .col-submit { width: 90px; color: var(--muted); font-variant-numeric: tabular-nums; text-align: right; }
   .col-tags { min-width: 120px; }
+  .col-source {
+    min-width: 80px;
+    max-width: 160px;
+    font-size: 11px;
+    color: var(--muted);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
   .tag-badge {
     display: inline-block; padding: 1px 8px; margin: 1px 3px 1px 0;
     background: rgba(127,127,127,0.15); border-radius: 10px;
@@ -223,6 +233,7 @@ function render(
             <th class="col-rate">通过率</th>
             <th class="col-submit">提交数</th>
             <th class="col-tags">标签</th>
+            <th class="col-source">来源</th>
             <th class="col-ps">题库</th>
           </tr>
         </thead>
@@ -429,6 +440,11 @@ function render(
               }).join('');
             }
             tr.appendChild(tdTags);
+            const tdSource = document.createElement('td');
+            tdSource.className = 'col-source';
+            tdSource.textContent = p.source || '';
+            tdSource.title = p.source || '';
+            tr.appendChild(tdSource);
             const tdPs = document.createElement('td');
             tdPs.className = 'col-ps';
             const psTitles = (p.problemsets || []).map((x) => x.title).join(' / ');
