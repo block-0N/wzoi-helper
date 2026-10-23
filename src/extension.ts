@@ -198,7 +198,7 @@ export function activate(context: vscode.ExtensionContext) {
         vscode.window.showWarningMessage('登录状态丢失，请重新登录');
         return;
       }
-      const title = `我在题目 ${problemId} 的提交`;
+      const title = '我在题目 ' + problemId + ' 的提交';
       try {
         const filters: import('./api/wzoi').SubmissionFilters = {
           userName: username,
@@ -393,18 +393,60 @@ export function activate(context: vscode.ExtensionContext) {
   );
 
   // ---------- 命令：提交代码到题目 ----------
+  // ---------- 命令：提交代码到题目 ----------
+  // ---------- 命令：提交代码到题目 ----------
   const submitToProblem = vscode.commands.registerCommand(
     'wzoi-helper.submitToProblem',
-    async (node: ProblemNode) => {
-      if (!node?.summary) {
-        vscode.window.showErrorMessage('请从侧边栏的题目上右键提交');
-        return;
-      }
-      const { problemsetId, problemId } = node.summary;
-
+    async (node?: ProblemNode) => {
       const editor = vscode.window.activeTextEditor;
       if (!editor) {
         vscode.window.showErrorMessage('请先打开要提交的代码文件');
+        return;
+      }
+
+      let problemsetId: string | undefined;
+      let problemId: string | undefined;
+
+      if (node?.summary) {
+        problemsetId = node.summary.problemsetId;
+        problemId = node.summary.problemId;
+      } else {
+        const fsPath = editor.document.uri.fsPath;
+        const sub =
+          vscode.workspace.getConfiguration('wzoi').get<string>('workspaceFolder') ||
+          'wzoi';
+        const parts = fsPath.split(/[\\/]/);
+        const subIdx = parts.lastIndexOf(sub);
+        const psPart = subIdx >= 0 && parts.length > subIdx + 2 ? parts[subIdx + 1] : '';
+        const pidPart = subIdx >= 0 && parts.length > subIdx + 2 ? parts[subIdx + 2] : '';
+
+        if (subIdx >= 0 && /^\d+$/.test(psPart) && /^\d+$/.test(pidPart)) {
+          problemsetId = psPart;
+          problemId = pidPart;
+          console.log('[submit] 从路径推断：题库 ' + problemsetId + ' 题目 ' + problemId);
+        } else {
+          const pid = await vscode.window.showInputBox({
+            prompt: '当前文件不在 wzoi 工作区内，请输入题目 ID',
+            placeHolder: '例如 205',
+            validateInput: (v) => (/^\d+$/.test(v) ? null : '请输入数字'),
+          });
+          if (!pid) return;
+
+          const psid = await vscode.window.showInputBox({
+            prompt: '请输入题库 ID',
+            placeHolder: '例如 1',
+            value: '1',
+            validateInput: (v) => (/^\d+$/.test(v) ? null : '请输入数字'),
+          });
+          if (!psid) return;
+
+          problemsetId = psid.trim();
+          problemId = pid.trim();
+        }
+      }
+
+      if (!problemsetId || !problemId) {
+        vscode.window.showErrorMessage('无法确定题目 ID 或题库 ID');
         return;
       }
 
@@ -437,14 +479,12 @@ export function activate(context: vscode.ExtensionContext) {
         return;
       }
 
-      // 查题目属于哪些题库
       const idx = await getCachedIndex(context);
       const rec = idx?.problems.find((x) => x.pid === problemId);
       const allPs = rec && rec.problemsets.length > 0
         ? rec.problemsets
         : [{ id: problemsetId, title: `题库 ${problemsetId}` }];
 
-      // 多选题库
       const psPicks = await vscode.window.showQuickPick(
         allPs.map((ps) => ({
           label: ps.title,
@@ -462,11 +502,9 @@ export function activate(context: vscode.ExtensionContext) {
       );
       if (!psPicks || psPicks.length === 0) return;
 
-      // 逐个提交
       const submittedIds: { psId: string; psTitle: string; solutionId: number }[] = [];
       for (let psIdx = 0; psIdx < psPicks.length; psIdx++) {
         const ps = psPicks[psIdx];
-        // 多题库提交之间加延迟，避免触发 WAF 频率限制
         if (psIdx > 0) await new Promise((r) => setTimeout(r, 2000));
         try {
           const result = await vscode.window.withProgress(
@@ -474,12 +512,11 @@ export function activate(context: vscode.ExtensionContext) {
               location: vscode.ProgressLocation.Notification,
               title: `提交至 ${ps.label}...`,
             },
-            () => submitSolution(ps.id, problemId, code, pick.id, cookie)
+            () => submitSolution(ps.id, problemId!, code, pick.id, cookie)
           );
           submittedIds.push({ psId: ps.id, psTitle: ps.label, solutionId: result.solutionId });
         } catch (err) {
           const fullMsg = String(err);
-          // 完整错误写进 WZOI 输出通道（用户一定能看到）
           wzoiOutput.show(true);
           wzoiOutput.appendLine('');
           wzoiOutput.appendLine('===== 提交失败 =====');
@@ -487,7 +524,6 @@ export function activate(context: vscode.ExtensionContext) {
           wzoiOutput.appendLine(`题目: ${problemId}`);
           wzoiOutput.appendLine(fullMsg);
           wzoiOutput.appendLine('===================');
-          // 弹窗显示简短版
           const shortMsg = fullMsg.length > 300 ? fullMsg.slice(0, 300) + '...(详见输出面板 WZOI)' : fullMsg;
           vscode.window.showErrorMessage(`提交到 ${ps.label} 失败: ${shortMsg}`);
         }
@@ -496,7 +532,6 @@ export function activate(context: vscode.ExtensionContext) {
       if (submittedIds.length === 0) return;
       const solutionId = submittedIds[0].solutionId;
 
-      // 2) 轮询等待评测结果
       let finalDetail: import('./api/wzoi').SolutionDetail | undefined;
       let wasCancelled = false;
 
@@ -522,7 +557,6 @@ export function activate(context: vscode.ExtensionContext) {
         }
       );
 
-      // 3) 如果面板已打开过，插入新提交到缓存顶部
       if (finalDetail && submissionProvider.hasCache()) {
         submissionProvider.addLatest({
           id: finalDetail.id,
@@ -539,7 +573,6 @@ export function activate(context: vscode.ExtensionContext) {
 
       if (wasCancelled || !finalDetail) return;
 
-      // 3.5) 更新这道题的 AC 状态
       if (finalDetail.isFinished && finalDetail.problemTitle) {
         const sc = parseFloat(finalDetail.score);
         if (!isNaN(sc)) {
@@ -551,7 +584,6 @@ export function activate(context: vscode.ExtensionContext) {
         }
       }
 
-      // 4) 结果通知
       const scoreNum = parseFloat(finalDetail.score);
       let verdictText: string;
       let level: 'info' | 'warning' | 'error' = 'info';
@@ -681,7 +713,7 @@ export function activate(context: vscode.ExtensionContext) {
     'wzoi-helper.syncACStatus',
     () => syncACStatusInternal(false)
   );
-    // 提交记录缓存（首页统计用，复用「我的提交」面板缓存）
+  // 提交记录缓存（首页统计用，复用「我的提交」面板缓存）
   const getAllCachedSubmissions = async (): Promise<import('./api/wzoi').SubmissionSummary[]> => {
     if (submissionProvider.hasCache()) {
       return (submissionProvider as any).cache || [];
@@ -689,7 +721,7 @@ export function activate(context: vscode.ExtensionContext) {
     return [];
   };
 
-const openDashboard = vscode.commands.registerCommand(
+  const openDashboard = vscode.commands.registerCommand(
     'wzoi-helper.openDashboard',
     async () => {
       try {
