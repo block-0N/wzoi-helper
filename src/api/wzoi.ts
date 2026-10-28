@@ -632,7 +632,8 @@ export async function fetchCurrentUsername(
 export async function fetchAllMySubmissions(
   username: string,
   cookie?: string,
-  onProgress?: (page: number, count: number) => void
+  onProgress?: (page: number, count: number) => void,
+  stopAtId?: number
 ): Promise<SubmissionSummary[]> {
   const all: SubmissionSummary[] = [];
   const seen = new Set<number>();
@@ -642,6 +643,7 @@ export async function fetchAllMySubmissions(
 
   let url: string | undefined = `${BASE_URL}/solutions?${params.toString()}`;
   let page = 0;
+  let reachedOld = false;
 
   console.log(
     '[fetchAllMySubmissions] 开始，cookie=' + (cookie ? '有' : '无')
@@ -737,6 +739,10 @@ export async function fetchAllMySubmissions(
       if (tds.length < 9) return;
       const id = parseInt(tds.eq(0).text().trim(), 10);
       if (!id || seen.has(id)) return;
+      if (stopAtId && stopAtId > 0 && id <= stopAtId) {
+        reachedOld = true;
+        return;
+      }
       seen.add(id);
       all.push({
         id,
@@ -764,6 +770,11 @@ export async function fetchAllMySubmissions(
       console.log(
         `[fetchAllMySubmissions] 第 ${page} 页 0 行，终止`
       );
+      break;
+    }
+
+    if (reachedOld) {
+      console.log('[fetchAllMySubmissions] 遇到本地已有的提交，增量同步结束');
       break;
     }
 

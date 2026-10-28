@@ -1,4 +1,5 @@
 import { ProblemListPanel } from './webview/problemListPanel';
+import { SubmissionCache } from './cache/submissionCache';
 import { getCachedIndex, buildIndex } from './indexer/problemIndexer';
 import { fetchAllProblemsets } from './api/wzoi';
 import * as vscode from 'vscode';
@@ -248,7 +249,8 @@ export function activate(context: vscode.ExtensionContext) {
   if (cachedScores && cachedScores.length) {
     treeProvider.setScoreIndex(new Map(cachedScores));
   }
-  const submissionProvider = new SubmissionTreeProvider(getCookie, getUsername);
+  const submissionCache = new SubmissionCache(context, getUsername);
+  const submissionProvider = new SubmissionTreeProvider(getUsername, submissionCache);
   const submissionView = vscode.window.createTreeView('wzoiSubmissions', {
     treeDataProvider: submissionProvider,
   });
@@ -385,6 +387,7 @@ export function activate(context: vscode.ExtensionContext) {
       await context.secrets.delete('wzoi.cookie');
       await context.secrets.delete('wzoi.username');
       await context.secrets.delete('wzoi.password');
+      submissionCache.clear().catch(() => {});
       vscode.window.showInformationMessage('已退出 WZOI');
       treeProvider.refresh();
       submissionProvider.refresh();
@@ -557,8 +560,8 @@ export function activate(context: vscode.ExtensionContext) {
         }
       );
 
-      if (finalDetail && submissionProvider.hasCache()) {
-        submissionProvider.addLatest({
+      if (finalDetail) {
+        submissionCache.addLatest({
           id: finalDetail.id,
           userDisplay: finalDetail.userDisplay,
           problemTitle: finalDetail.problemTitle,
@@ -569,6 +572,7 @@ export function activate(context: vscode.ExtensionContext) {
           length: finalDetail.length,
           submitTime: finalDetail.submitTime,
         });
+        submissionProvider.refresh();
       }
 
       if (wasCancelled || !finalDetail) return;
@@ -634,7 +638,7 @@ export function activate(context: vscode.ExtensionContext) {
             location: vscode.ProgressLocation.Notification,
             title: `加载提交 #${id}...`,
           },
-          () => fetchSolution(id, cookie)
+          () => submissionCache.fetchDetail(id, cookie)
         );
         SolutionPanel.createOrShow(context.extensionUri, detail);
       } catch (err) {
@@ -671,27 +675,26 @@ export function activate(context: vscode.ExtensionContext) {
       return;
     }
     try {
-      const subs = await (silent
-        ? fetchAllMySubmissions(username, cookie)
+      const result = await (silent
+        ? submissionCache.sync(cookie)
         : vscode.window.withProgress(
-          {
-            location: vscode.ProgressLocation.Notification,
-            title: '同步提交记录...',
-            cancellable: false,
-          },
-          () => fetchAllMySubmissions(username, cookie)
-        ));
+            {
+              location: vscode.ProgressLocation.Notification,
+              title: '同步提交记录...',
+              cancellable: false,
+            },
+            (progress) =>
+              submissionCache.sync(cookie, (msg) =>
+                progress.report({ message: msg })
+              )
+          ));
 
+      const subs = submissionCache.getList();
       const index = buildScoreIndex(subs);
       treeProvider.setScoreIndex(index);
 
-      // 诊断日志：确认同步结果
       wzoiOutput.appendLine(
-        '[sync] 已同步 ' + subs.length + ' 条提交，覆盖 ' + index.size + ' 道题'
-      );
-      wzoiOutput.appendLine(
-        '[sync] 前 3 条样例: ' +
-        subs.slice(0, 3).map((s) => s.problemTitle + '=' + s.score).join(' | ')
+        `[sync] 新增 ${result.added} 条，本地共 ${result.total} 条，覆盖 ${index.size} 道题`
       );
       await context.globalState.update(
         SCORE_CACHE_KEY,
@@ -699,12 +702,15 @@ export function activate(context: vscode.ExtensionContext) {
       );
       await context.globalState.update(LAST_SYNC_KEY, Date.now());
 
+      submissionProvider.refresh();
+
       if (!silent) {
         vscode.window.showInformationMessage(
-          `已同步 ${subs.length} 条提交，覆盖 ${index.size} 道题`
+          `同步完成：新增 ${result.added} 条，共 ${result.total} 条，覆盖 ${index.size} 道题`
         );
       }
     } catch (err) {
+      wzoiOutput.appendLine(`[sync] 失败: ${err}`);
       if (!silent) vscode.window.showErrorMessage(`同步失败: ${err}`);
     }
   };
@@ -715,10 +721,8 @@ export function activate(context: vscode.ExtensionContext) {
   );
   // 提交记录缓存（首页统计用，复用「我的提交」面板缓存）
   const getAllCachedSubmissions = async (): Promise<import('./api/wzoi').SubmissionSummary[]> => {
-    if (submissionProvider.hasCache()) {
-      return (submissionProvider as any).cache || [];
-    }
-    return [];
+    await submissionCache.load();
+    return submissionCache.getList();
   };
 
   const openDashboard = vscode.commands.registerCommand(
