@@ -148,6 +148,16 @@
       {
         "command": "wzoi-helper.openProblemHistory",
         "title": "WZOI: 查看题目历史提交"
+      },
+      {
+        "command": "wzoi-helper.refreshProblemset",
+        "title": "WZOI: 刷新指定题库索引",
+        "icon": "$(refresh)"
+      },
+      {
+        "command": "wzoi-helper.forceFullSyncSubmissions",
+        "title": "WZOI: 全量重抓提交记录（清空缓存重来）",
+        "icon": "$(sync)"
       }
     ],
     "menus": {
@@ -320,7 +330,8 @@
   },
   "overrides": {
     "diff": "^8.0.4",
-    "serialize-javascript": "^7.0.6"
+    "serialize-javascript": "^7.0.6",
+    "undici-types": "5.26.5"
   },
   "dependencies": {
     "@highlightjs/cdn-assets": "^11.12.0",

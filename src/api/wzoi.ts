@@ -629,107 +629,86 @@ export async function fetchCurrentUsername(
 }
 
 /** 翻页抓取自己所有提交记录 */
+export interface FetchAllResult {
+  items: SubmissionSummary[];
+  resumeUrl?: string;
+  completed: boolean;
+}
+
 export async function fetchAllMySubmissions(
   username: string,
   cookie?: string,
   onProgress?: (page: number, count: number) => void,
-  stopAtId?: number
-): Promise<SubmissionSummary[]> {
+  stopAtId?: number,
+  resumeFromUrl?: string
+): Promise<FetchAllResult> {
   const all: SubmissionSummary[] = [];
   const seen = new Set<number>();
 
   const params = new URLSearchParams();
   params.append('user_name', username);
 
-  let url: string | undefined = `${BASE_URL}/solutions?${params.toString()}`;
+  let url: string | undefined = resumeFromUrl
+    ? (resumeFromUrl.startsWith('http') ? resumeFromUrl : `${BASE_URL}${resumeFromUrl}`)
+    : `${BASE_URL}/solutions?${params.toString()}`;
   let page = 0;
   let reachedOld = false;
 
-  console.log(
-    '[fetchAllMySubmissions] 开始，cookie=' + (cookie ? '有' : '无')
-  );
-
-  const UA =
-    'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36';
-
-  // 检测是否是 WZOI 的 EO_Bot_Ssid 反爬页
+  const UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36';
   const isBotPage = (html: string): boolean => {
-    return (
-      (html.length < 3000 && html.includes('EO_Bot_Ssid')) ||
-      html.includes('_0x649a') ||
-      (html.length < 3000 && html.includes('_0x'))
-    );
+    if (html.length >= 5000) return false;
+    return /EO_Bot_Ssid|_0x[0-9a-f]{4,}|__EO_CACHE|challenge-platform/i.test(html);
   };
 
-  let consecutiveBotPages = 0;
+  let resumeUrl: string | undefined;
 
   while (url && page < 200) {
     page++;
-
-    // 拉取当前页，最多重试 5 次（每次遇到 bot 页就等，等到了继续）
     let html = '';
     let success = false;
+
     for (let attempt = 0; attempt < 5; attempt++) {
       try {
         const resp = await axios.get(url, {
           headers: {
             'User-Agent': UA,
-            Accept:
-              'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',
+            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',
             'Accept-Language': 'zh-CN,zh;q=0.9,en;q=0.8',
+            'Referer': 'https://wzoi.cn/',
             ...(cookie ? { Cookie: cookie } : {}),
           },
           timeout: 15000,
+          validateStatus: () => true,
         });
-        const body: string = resp.data;
+        const body: string = typeof resp.data === 'string' ? resp.data : String(resp.data);
 
-        if (isBotPage(body)) {
-          const waitMs = 3000 * (attempt + 1); // 3s, 6s, 9s, 12s, 15s
-          console.warn(
-            `[fetchAllMySubmissions] 第 ${page} 页第 ${attempt + 1}/5 次遇到 WAF 反爬页（${body.length} 字节），等 ${waitMs}ms 重试...`
-          );
+        if (isBotPage(body) || resp.status === 403 || resp.status === 429) {
+          const waitMs = Math.min(3000 * Math.pow(2, attempt), 30000);
+          console.warn(`[fetchAllMySubmissions] 第 ${page} 页第 ${attempt + 1}/5 次 WAF，等 ${waitMs}ms`);
           await new Promise((r) => setTimeout(r, waitMs));
           continue;
         }
-
         html = body;
         success = true;
         break;
       } catch (e: any) {
-        const status = e && e.response ? e.response.status : '(网络错误)';
-        console.warn(
-          `[fetchAllMySubmissions] 第 ${page} 页第 ${attempt + 1}/5 次失败: ${status}，等 3s 重试...`
-        );
-        await new Promise((r) => setTimeout(r, 3000));
+        const status = e?.response?.status ?? 'network';
+        console.warn(`[fetchAllMySubmissions] 第 ${page} 页第 ${attempt + 1}/5 次失败: ${status}`);
+        await new Promise((r) => setTimeout(r, 3000 * (attempt + 1)));
       }
     }
 
     if (!success) {
-      console.error(
-        `[fetchAllMySubmissions] 第 ${page} 页 5 次都失败，跳过这页继续。累计 ${all.length} 条`
-      );
-      consecutiveBotPages++;
-      if (consecutiveBotPages >= 3) {
-        console.error(
-          `[fetchAllMySubmissions] 连续 3 页失败，可能被 WAF 长时间封了，终止`
-        );
-        break;
-      }
-      // 跳过这页：尝试从当前 HTML 里拿 next，拿不到就终止
-      // 由于没有成功拿到 html，这里只能终止
-      // （或者向前走无法推进，只能 break）
+      console.error(`[fetchAllMySubmissions] 第 ${page} 页 5 次失败，记录断点 ${url}`);
+      resumeUrl = url;
       break;
     }
-    consecutiveBotPages = 0;
 
     const $ = cheerio.load(html);
 
-    const isLoginPage =
-      html.includes('/auth/login') && !html.includes('solutions-tbody');
+    const isLoginPage = html.includes('/auth/login') && !html.includes('solutions-tbody');
     if (isLoginPage) {
-      console.error(
-        `[fetchAllMySubmissions] 第 ${page} 页返回登录页，Cookie 可能失效，终止`
-      );
+      console.error(`[fetchAllMySubmissions] 第 ${page} 页返回登录页，Cookie 失效，终止`);
       break;
     }
 
@@ -746,9 +725,7 @@ export async function fetchAllMySubmissions(
       seen.add(id);
       all.push({
         id,
-        userDisplay:
-          tds.eq(1).find('a').first().text().trim() ||
-          tds.eq(1).text().trim(),
+        userDisplay: tds.eq(1).find('a').first().text().trim() || tds.eq(1).text().trim(),
         problemTitle: tds.eq(2).text().trim(),
         score: tds.eq(3).text().trim(),
         time: tds.eq(4).text().trim(),
@@ -760,43 +737,23 @@ export async function fetchAllMySubmissions(
       rowCount++;
     });
 
-    if (page <= 3 || page % 10 === 0) {
-      console.log(
-        `[fetchAllMySubmissions] 第 ${page} 页: ${rowCount} 行, 累计 ${all.length}`
-      );
-    }
-
-    if (rowCount === 0) {
-      console.log(
-        `[fetchAllMySubmissions] 第 ${page} 页 0 行，终止`
-      );
-      break;
-    }
-
-    if (reachedOld) {
-      console.log('[fetchAllMySubmissions] 遇到本地已有的提交，增量同步结束');
-      break;
-    }
-
     onProgress?.(page, all.length);
 
+    if (rowCount === 0) break;
+    if (reachedOld) break;
+
     const next = $('a[rel="next"]').attr('href');
-    if (!next) {
-      console.log(
-        `[fetchAllMySubmissions] 第 ${page} 页无 rel="next"，终止。累计 ${all.length}`
-      );
-      break;
-    }
+    if (!next) break;
     url = next.startsWith('http') ? next : `${BASE_URL}${next}`;
 
-    // 页间隔拉长到 800ms，减少 WAF 触发概率
-    await new Promise((r) => setTimeout(r, 800));
+    await new Promise((r) => setTimeout(r, 1500));
   }
 
-  console.log(
-    `[fetchAllMySubmissions] 完成，共 ${all.length} 条，${page} 页`
-  );
-  return all;
+  return {
+    items: all,
+    resumeUrl,
+    completed: !resumeUrl,
+  };
 }
 
 /** 从提交列表构建「题目名 → 最高分」映射 */
@@ -1266,32 +1223,73 @@ export async function fetchUserSubmissions(
 
   let url: string | undefined = `${BASE_URL}/solutions?${params.toString()}`;
   let page = 0;
+  let consecutiveEmptyPages = 0;
+
+  const UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36';
+  const isBotPage = (html: string): boolean => {
+    if (html.length >= 5000) return false;
+    return /EO_Bot_Ssid|_0x[0-9a-f]{4,}|__EO_CACHE|challenge-platform/i.test(html);
+  };
 
   while (url && page < 100) {
     page++;
-    const { data: html } = await axios.get(url, {
-      headers: {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
-        ...(cookie ? { Cookie: cookie } : {}),
-      },
-      timeout: 15000,
-    });
+
+    let html = '';
+    let success = false;
+    for (let attempt = 0; attempt < 5; attempt++) {
+      try {
+        const resp = await axios.get(url, {
+          headers: {
+            'User-Agent': UA,
+            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',
+            'Accept-Language': 'zh-CN,zh;q=0.9,en;q=0.8',
+            'Referer': 'https://wzoi.cn/',
+            ...(cookie ? { Cookie: cookie } : {}),
+          },
+          timeout: 15000,
+          validateStatus: () => true,
+        });
+        const body: string = typeof resp.data === 'string' ? resp.data : String(resp.data);
+
+        if (isBotPage(body) || resp.status === 403 || resp.status === 429) {
+          const waitMs = Math.min(3000 * Math.pow(2, attempt), 30000);
+          console.warn(`[fetchUserSubmissions] 第 ${page} 页第 ${attempt + 1}/5 次 WAF (HTTP ${resp.status}, ${body.length}B)，等 ${waitMs}ms`);
+          await new Promise((r) => setTimeout(r, waitMs));
+          continue;
+        }
+
+        html = body;
+        success = true;
+        break;
+      } catch (e: any) {
+        const status = e?.response?.status ?? 'network';
+        console.warn(`[fetchUserSubmissions] 第 ${page} 页第 ${attempt + 1}/5 次网络失败: ${status}`);
+        await new Promise((r) => setTimeout(r, 3000 * (attempt + 1)));
+      }
+    }
+
+    if (!success) {
+      console.error(`[fetchUserSubmissions] 第 ${page} 页 5 次失败，终止。已累计 ${all.length} 条`);
+      break;
+    }
 
     const $ = cheerio.load(html);
 
+    if (html.includes('/auth/login') && !html.includes('solutions-tbody')) {
+      console.error(`[fetchUserSubmissions] 第 ${page} 页返回登录页，Cookie 可能失效，终止`);
+      break;
+    }
+
+    let rowCount = 0;
     $('#solutions-tbody > tr').each((_, tr) => {
       const tds = $(tr).find('td');
       if (tds.length < 9) return;
-
       const id = parseInt(tds.eq(0).text().trim(), 10);
       if (!id || seen.has(id)) return;
       seen.add(id);
-
       all.push({
         id,
-        userDisplay:
-          tds.eq(1).find('a').first().text().trim() ||
-          tds.eq(1).text().trim(),
+        userDisplay: tds.eq(1).find('a').first().text().trim() || tds.eq(1).text().trim(),
         problemTitle: tds.eq(2).text().trim(),
         score: tds.eq(3).text().trim(),
         time: tds.eq(4).text().trim(),
@@ -1300,16 +1298,26 @@ export async function fetchUserSubmissions(
         length: tds.eq(7).text().trim(),
         submitTime: tds.eq(8).text().trim(),
       });
+      rowCount++;
     });
 
     onProgress?.(page, all.length);
 
-    // cursor 分页
+    if (rowCount === 0) {
+      consecutiveEmptyPages++;
+      if (consecutiveEmptyPages >= 2) {
+        console.log(`[fetchUserSubmissions] 连续 ${consecutiveEmptyPages} 页为空，终止`);
+        break;
+      }
+    } else {
+      consecutiveEmptyPages = 0;
+    }
+
     const next = $('a[rel="next"]').attr('href');
     if (!next) break;
     url = next.startsWith('http') ? next : `${BASE_URL}${next}`;
 
-    await new Promise((r) => setTimeout(r, 200));
+    await new Promise((r) => setTimeout(r, 1500));
   }
 
   return all;

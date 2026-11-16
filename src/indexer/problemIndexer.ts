@@ -7,6 +7,7 @@ import {
   searchTagsByPid,
   computeStatsFromSubmissions,
 } from '../api/wzoi';
+import type { ProblemsetMeta, ProblemSummary } from '../api/wzoi';
 
 export interface ProblemRecord {
   pid: string;
@@ -262,4 +263,180 @@ export async function buildIndex(
   }
 
   return index;
+}
+
+// ============ 增量刷新单个题库 ============
+
+export interface RefreshStats {
+  added: number;
+  updated: number;
+  removed: number;
+  total: number;
+}
+
+export async function refreshProblemsetIndex(
+  ctx: vscode.ExtensionContext,
+  psid: string,
+  cookie: string | undefined,
+  progress: vscode.Progress<{ message?: string; increment?: number }>,
+  token: vscode.CancellationToken
+): Promise<{ index: ProblemIndex; stats: RefreshStats }> {
+  const oldIndex = await getCachedIndex(ctx);
+  if (!oldIndex) {
+    throw new Error('索引尚未构建。请先执行「WZOI: 构建题库索引」。');
+  }
+
+  progress.report({ message: '抓取题库 ' + psid + ' 题目列表...' });
+  const meta = await fetchProblemsetAll(psid, cookie, (cur, total) => {
+    if (total > 1) {
+      progress.report({ message: '题库 ' + psid + '：第 ' + cur + '/' + total + ' 页' });
+    }
+  });
+
+  if (token.isCancellationRequested) throw new Error('已取消');
+
+  progress.report({ message: '合并到现有索引...' });
+  const { merged, added, updated, removed } = mergeProblemsetIntoIndex(
+    oldIndex,
+    psid,
+    meta
+  );
+
+  if (added.length > 0 && !token.isCancellationRequested) {
+    const need = added.filter(
+      (r) =>
+        r.submitCount === undefined ||
+        r.passRate === undefined ||
+        r.tags.length === 0
+    );
+    for (let i = 0; i < need.length; i++) {
+      if (token.isCancellationRequested) throw new Error('已取消');
+      const r = need[i];
+      progress.report({
+        message: '补全新题 (' + (i + 1) + '/' + need.length + ')：' + r.title.slice(0, 18),
+      });
+
+      if (r.submitCount === undefined || r.passRate === undefined) {
+        try {
+          const stats = await fetchProblemStats(psid, r.pid, cookie);
+          if (stats.submitCount !== undefined && stats.passRate) {
+            r.submitCount = stats.submitCount;
+            r.passRate = stats.passRate;
+          } else {
+            const fallback = await computeStatsFromSubmissions(psid, r.pid, cookie);
+            if (fallback.submitCount !== undefined) {
+              r.submitCount = fallback.submitCount;
+              r.passRate = fallback.passRate;
+            }
+          }
+        } catch (e) {
+          console.error('[refresh] 补全 stats 失败 ' + r.pid + ':', e);
+        }
+      }
+      if (r.tags.length === 0) {
+        try {
+          const tags = await searchTagsByPid(r.title, r.pid, cookie);
+          if (tags.length > 0) r.tags = tags;
+        } catch (e) {
+          console.error('[refresh] 反查标签失败 ' + r.pid + ':', e);
+        }
+      }
+      await new Promise((res) => setTimeout(res, 100));
+    }
+  }
+
+  const newIndex: ProblemIndex = {
+    version: INDEX_VERSION,
+    updatedAt: Date.now(),
+    problems: merged,
+  };
+
+  try {
+    const uri = await getIndexFilePath(ctx);
+    const json = JSON.stringify(newIndex);
+    await vscode.workspace.fs.writeFile(uri, Buffer.from(json, 'utf8'));
+    console.log('[Index] 增量刷新完成，已写入: ' + uri.fsPath + '（' + json.length + ' 字节）');
+  } catch (e) {
+    console.error('[Index] 增量刷新写文件失败：', e);
+    await ctx.globalState.update(STORAGE_KEY, newIndex);
+  }
+
+  return {
+    index: newIndex,
+    stats: { added: added.length, updated, removed, total: merged.length },
+  };
+}
+
+function mergeProblemsetIntoIndex(
+  oldIndex: ProblemIndex,
+  psid: string,
+  fresh: ProblemsetMeta
+): {
+  merged: ProblemRecord[];
+  added: ProblemRecord[];
+  updated: number;
+  removed: number;
+} {
+  const freshMap = new Map<string, ProblemSummary>();
+  for (const p of fresh.problems) freshMap.set(p.problemId, p);
+
+  const merged: ProblemRecord[] = [];
+  const added: ProblemRecord[] = [];
+  const touched = new Set<string>();
+  let updated = 0;
+  let removed = 0;
+
+  const newPsRef = { id: psid, title: fresh.title || '题库 ' + psid };
+
+  for (const rec of oldIndex.problems) {
+    const inFresh = freshMap.get(rec.pid);
+    const belonged = rec.problemsets.some((x) => x.id === psid);
+
+    if (inFresh) {
+      const psList = belonged
+        ? rec.problemsets.map((x) =>
+            x.id === psid ? { ...x, title: newPsRef.title } : x
+          )
+        : [...rec.problemsets, newPsRef];
+
+      merged.push({
+        pid: rec.pid,
+        title: inFresh.title || rec.title,
+        problemsets: psList,
+        tags: inFresh.tags && inFresh.tags.length > 0 ? inFresh.tags : rec.tags,
+        submitCount: inFresh.submitCount
+          ? parseInt(inFresh.submitCount, 10) || rec.submitCount
+          : rec.submitCount,
+        passRate: inFresh.passRate || rec.passRate,
+        source: inFresh.source || rec.source,
+      });
+      touched.add(rec.pid);
+      updated++;
+    } else if (belonged) {
+      const rest = rec.problemsets.filter((x) => x.id !== psid);
+      if (rest.length === 0) removed++;
+      else merged.push({ ...rec, problemsets: rest });
+    } else {
+      merged.push(rec);
+    }
+  }
+
+  for (const [pid, p] of freshMap) {
+    if (touched.has(pid)) continue;
+    const newRec: ProblemRecord = {
+      pid,
+      title: p.title,
+      problemsets: [newPsRef],
+      tags: p.tags || [],
+      submitCount: p.submitCount
+        ? parseInt(p.submitCount, 10) || undefined
+        : undefined,
+      passRate: p.passRate,
+      source: p.source,
+    };
+    merged.push(newRec);
+    added.push(newRec);
+  }
+
+  return { merged, added, updated, removed };
 }

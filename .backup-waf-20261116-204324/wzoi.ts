@@ -1,0 +1,1709 @@
+import axios from 'axios';
+import * as cheerio from 'cheerio';
+
+const BASE_URL = 'https://wzoi.cn';
+
+export interface Problem {
+  id: string;
+  title: string;
+  description: string;
+  inputFormat: string;
+  outputFormat: string;
+  samples: { input: string; output: string }[];
+  hint: string;
+  timeLimit: string;
+  memoryLimit: string;
+  source: string;
+  /** 题解 HTML，没有则为空 */
+  solution: string;
+}
+
+export async function fetchProblem(
+  id: string,
+  problemsetId: string = '1',
+  cookie?: string
+): Promise<Problem> {
+  const url = `${BASE_URL}/s/${problemsetId}/${id}`;
+  const { data: html } = await axios.get(url, {
+    headers: {
+      'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
+      ...(cookie ? { Cookie: cookie } : {}),
+    },
+    timeout: 15000,
+  });
+  return parseProblem(id, html, cookie);
+}
+
+async function parseProblem(
+  id: string,
+  html: string,
+  cookie?: string
+): Promise<Problem> {
+  const $ = cheerio.load(html);
+
+  // 题目主容器
+  const container = $('div[style*="font-size: 20px"]').first();
+  const title = container.find('h1.page-header').text().trim();
+
+  // 按 h4 标题分段，收集它后面直到下一个 h4 之前的所有文本
+  const getSection = (headingKey: string): string => {
+    const h4 = container
+      .find('h4')
+      .filter((_, el) => $(el).text().includes(headingKey))
+      .first();
+    if (!h4.length) return '';
+
+    const parts: string[] = [];
+    let next = h4.next();
+    while (next.length && !next.is('h4')) {
+      // 用 outerHTML 保留元素本身及其内部标签（p、pre、ul、ol…）
+      const outer = $.html(next) ?? '';
+      if (outer.trim()) parts.push(outer.trim());
+      next = next.next();
+    }
+    return parts.join('\n').trim();
+  };
+
+  const description = getSection('题目描述');
+  const inputFormat = getSection('输入格式');
+  const outputFormat = getSection('输出格式');
+  const hint = getSection('提示');
+
+  // 把字段里的相对路径图片下载为 base64（WZOI 图片需要 Cookie 才能访问）
+  const inlineImages = async (htmlStr: string): Promise<string> => {
+    if (!htmlStr || !htmlStr.includes('<img')) return htmlStr;
+    const $ = cheerio.load(htmlStr, null, false);
+    const imgs = $('img').toArray();
+    for (const el of imgs) {
+      const $el = $(el);
+      const s = $el.attr('src') || '';
+      if (!s) continue;
+      if (s.startsWith('data:')) continue;
+      const dataUri = await fetchImageAsDataUri(s, cookie);
+      if (dataUri) {
+        $el.attr('src', dataUri);
+      } else {
+        $el.remove();
+      }
+    }
+    return $.html() || htmlStr;
+  };
+
+  const descriptionHtml = await inlineImages(description);
+  const inputFormatHtml = await inlineImages(inputFormat);
+  const outputFormatHtml = await inlineImages(outputFormat);
+  const hintHtml = await inlineImages(hint);
+  // 题解：在 #tutorial 标签页里，通常是一个 <pre> 代码块
+  const tutorialEl = $('#tutorial');
+  let solution = '';
+  if (tutorialEl.length) {
+    // 保留 pre/code 结构和 class（用于语法高亮）
+    solution = (tutorialEl.html() ?? '').trim();
+  }
+  const solutionHtml = await inlineImages(solution);
+  // 样例：.sample_io 按顺序成对出现（输入、输出、输入、输出……）
+  // 样例：pre.sample_io 按顺序成对出现（输入、输出、输入、输出……）
+  // 每个 pre 内部可能包含多个样例（用 "样例N" 行分隔）
+  const splitMultiSamples = (text: string): string[] => {
+    const t = text.replace(/\r\n/g, '\n').trim();
+    if (!t) return [];
+    if (/^样例\s*\d+\s*$/m.test(t)) {
+      const parts = t
+        .split(/^样例\s*\d+\s*$/m)
+        .map((s) => s.trim())
+        .filter((s) => s);
+      if (parts.length > 0) return parts;
+    }
+    return [t];
+  };
+
+  const sampleInputs: string[] = [];
+  const sampleOutputs: string[] = [];
+  const samplePres = container.find('pre.sample_io').toArray();
+  for (let i = 0; i < samplePres.length; i++) {
+    const raw = $(samplePres[i]).text();
+    const parts = splitMultiSamples(raw);
+    if (i % 2 === 0) {
+      sampleInputs.push(...parts);
+    } else {
+      sampleOutputs.push(...parts);
+    }
+  }
+  const samples: { input: string; output: string }[] = [];
+  const sampleCount = Math.min(sampleInputs.length, sampleOutputs.length);
+  for (let i = 0; i < sampleCount; i++) {
+    samples.push({ input: sampleInputs[i], output: sampleOutputs[i] });
+  }
+
+  // 时间/空间限制从整段文本里正则提取
+  const fullText = container.text();
+  const timeLimit = fullText.match(/时间限制:\s*(\d+\s*ms)/)?.[1] ?? '';
+  const memoryLimit = fullText.match(/空间限制:\s*(\d+\s*MB)/)?.[1] ?? '';
+
+  // 来源
+  let source = '';
+  container.find('p').each((_, el) => {
+    const t = $(el).text().trim();
+    if (t.startsWith('来源:')) {
+      source = t.replace('来源:', '').trim();
+    }
+  });
+
+  return {
+    id,
+    title,
+    description: descriptionHtml,
+    inputFormat: inputFormatHtml,
+    outputFormat: outputFormatHtml,
+    samples,
+    hint: hintHtml,
+    timeLimit,
+    memoryLimit,
+    source,
+    solution: solutionHtml,
+  };
+}
+
+/**
+ * 把 Problem 拼成 Markdown 文本，方便在编辑器里展示
+ */
+export function problemToMarkdown(p: Problem): string {
+  const lines: string[] = [];
+  lines.push(`# ${p.title}`);
+  lines.push('');
+  if (p.timeLimit || p.memoryLimit) {
+    lines.push(`> 时间限制: ${p.timeLimit}  空间限制: ${p.memoryLimit}`);
+    lines.push('');
+  }
+  lines.push('## 题目描述');
+  lines.push(p.description || '（无）');
+  lines.push('');
+  lines.push('## 输入格式');
+  lines.push(p.inputFormat || '（无）');
+  lines.push('');
+  lines.push('## 输出格式');
+  lines.push(p.outputFormat || '（无）');
+  lines.push('');
+  p.samples.forEach((s, i) => {
+    lines.push(`## 样例 ${i + 1}`);
+    lines.push('**输入**');
+    lines.push('```');
+    lines.push(s.input);
+    lines.push('```');
+    lines.push('**输出**');
+    lines.push('```');
+    lines.push(s.output);
+    lines.push('```');
+    lines.push('');
+  });
+  if (p.hint) {
+    lines.push('## 提示');
+    lines.push(p.hint);
+    lines.push('');
+  }
+  if (p.source) {
+    lines.push(`---`);
+    lines.push(`来源: ${p.source}`);
+  }
+  return lines.join('\n');
+}
+export interface ProblemSummary {
+  problemsetId: string;
+  problemId: string;
+  title: string;
+  problemsetTitle?: string;
+  /** 提交数（普通题库列表页才有） */
+  submitCount?: string;
+  /** 通过率，如 "52.19%" */
+  passRate?: string;
+  /** 来源，如 "原创" */
+  source?: string;
+  /** 标签列表 */
+  tags?: { id: string; name: string }[];
+}
+
+export interface ProblemsetMeta {
+  id: string;
+  title: string;
+  description: string;
+  isContest: boolean;
+  problems: ProblemSummary[];
+}
+
+/**
+ * 抓取题库某一页
+ */
+export async function fetchProblemsetPage(
+  problemsetId: string,
+  page: number,
+  cookie?: string
+): Promise<{ meta: ProblemsetMeta; totalPages: number }> {
+  const url = `${BASE_URL}/s/${problemsetId}?page=${page}`;
+  const { data: html } = await axios.get(url, {
+    headers: {
+      'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
+      ...(cookie ? { Cookie: cookie } : {}),
+    },
+    timeout: 15000,
+  });
+
+  const meta = parseProblemset(problemsetId, html);
+  const totalPages = parseTotalPages(html);
+  return { meta, totalPages };
+}
+
+/**
+ * 从分页组件里解析出总页数
+ */
+function parseTotalPages(html: string): number {
+  const $ = cheerio.load(html);
+  let max = 1;
+  $('.pagination .page-link').each((_, el) => {
+    const href = $(el).attr('href') ?? '';
+    const m = href.match(/[?&]page=(\d+)/);
+    if (m) {
+      const n = parseInt(m[1], 10);
+      if (n > max) max = n;
+    }
+  });
+  return max;
+}
+
+/**
+ * 抓取题库所有页，合并成完整列表。
+ * onProgress 可以拿到 (currentPage, totalPages) 回调。
+ */
+export async function fetchProblemsetAll(
+  problemsetId: string,
+  cookie?: string,
+  onProgress?: (current: number, total: number) => void
+): Promise<ProblemsetMeta> {
+  const first = await fetchProblemsetPage(problemsetId, 1, cookie);
+  const total = first.totalPages;
+  const all = [...first.meta.problems];
+  onProgress?.(1, total);
+
+  for (let p = 2; p <= total; p++) {
+    // 稍微限速，别给 OJ 服务器压力
+    await new Promise((r) => setTimeout(r, 200));
+    try {
+      const { meta } = await fetchProblemsetPage(problemsetId, p, cookie);
+      all.push(...meta.problems);
+    } catch (err) {
+      console.error(`抓取 ${problemsetId} 第 ${p} 页失败:`, err);
+    }
+    onProgress?.(p, total);
+  }
+
+  return { ...first.meta, problems: all };
+}
+
+function parseProblemset(problemsetId: string, html: string): ProblemsetMeta {
+  const $ = cheerio.load(html);
+
+  const title = $('h1.page-header').first().text().trim();
+  const isContest = $('ol.breadcrumb a[href="/contests"]').length > 0;
+
+  const descParts: string[] = [];
+  const $h1 = $('h1.page-header').first();
+  let cursor = $h1.next();
+  while (cursor.length && !cursor.is('div.table-responsive')) {
+    if (cursor.is('p')) {
+      const t = cursor.text().trim();
+      if (t) descParts.push(t);
+    }
+    cursor = cursor.next();
+  }
+
+  const headerMap = new Map<string, number>();
+  $('table.table thead tr th').each((idx, el) => {
+    const name = $(el).text().trim();
+    if (name) headerMap.set(name, idx);
+  });
+
+  const nameIdx = headerMap.get('名称');
+  const submitIdx = headerMap.get('提交数');
+  const rateIdx = headerMap.get('通过率');
+  const tagIdx = headerMap.get('标签');
+  const sourceIdx = headerMap.get('来源');
+
+  const problems: ProblemSummary[] = [];
+  const seen = new Set<string>();
+
+  $('table.table tbody tr').each((_, tr) => {
+    const tds = $(tr).find('td');
+    if (tds.length === 0) return;
+
+    let link: ReturnType<typeof $> | undefined;
+    if (nameIdx !== undefined && nameIdx < tds.length) {
+      const cand = tds.eq(nameIdx).find('a').first();
+      if (cand.length) link = cand;
+    }
+    if (!link || !link.length) {
+      tds.each((_, td) => {
+        if (link && link.length) return;
+        const cand = $(td).find('a[href^="/s/"]').first();
+        if (cand.length && /^\/s\/\d+\/\d+/.test(cand.attr('href') ?? '')) {
+          link = cand;
+        }
+      });
+    }
+    if (!link || !link.length) return;
+
+    const href = link.attr('href') ?? '';
+    const pm = href.match(/^\/s\/(\d+)\/(\d+)/);
+    if (!pm) return;
+
+    const pid = pm[2];
+    if (seen.has(pid)) return;
+    seen.add(pid);
+
+    const submitCount =
+      submitIdx !== undefined && submitIdx < tds.length
+        ? tds.eq(submitIdx).text().trim()
+        : undefined;
+    const passRate =
+      rateIdx !== undefined && rateIdx < tds.length
+        ? tds.eq(rateIdx).text().trim()
+        : undefined;
+    const source =
+      sourceIdx !== undefined && sourceIdx < tds.length
+        ? tds.eq(sourceIdx).text().trim()
+        : undefined;
+
+    const tags: { id: string; name: string }[] = [];
+    if (tagIdx !== undefined && tagIdx < tds.length) {
+      tds.eq(tagIdx).find('a.openpop').each((_, tagEl) => {
+        const tagHref = $(tagEl).attr('href') ?? '';
+        const tm = tagHref.match(/#tag-(\d+)/);
+        const tagName = $(tagEl).text().trim();
+        if (tm && tagName) tags.push({ id: tm[1], name: tagName });
+      });
+    }
+
+    problems.push({
+      problemsetId: pm[1],
+      problemId: pid,
+      title: link.text().trim(),
+      submitCount: submitCount || undefined,
+      passRate: passRate || undefined,
+      source: source || undefined,
+      tags: tags.length > 0 ? tags : undefined,
+    });
+  });
+
+  return {
+    id: problemsetId,
+    title,
+    description: descParts.join('\n').trim(),
+    isContest,
+    problems,
+  };
+}
+
+// ============ 提交相关 ============
+
+export interface SubmissionSummary {
+  id: number;
+  userDisplay: string;
+  problemTitle: string;
+  score: string;
+  time: string;
+  memory: string;
+  language: string;
+  length: string;
+  submitTime: string;
+}
+
+export interface SolutionDetail {
+  id: number;
+  userDisplay: string;
+  problemTitle: string;
+  problemUrl: string;
+  score: string;
+  time: string;
+  memory: string;
+  language: string;
+  length: string;
+  status: string;
+  submitTime: string;
+  judgeTime: string;
+  testcases: {
+    id: string;
+    score: string;
+    time: string;
+    memory: string;
+    verdict: string;
+  }[];
+  code: string;
+  codeLanguage: string;
+  isFinished: boolean;
+}
+
+/** 抓自己的提交列表 */
+export async function fetchMySubmissions(
+  username: string,
+  cookie?: string
+): Promise<SubmissionSummary[]> {
+  const url = `${BASE_URL}/solutions?user_name=${encodeURIComponent(username)}`;
+  const { data: html } = await axios.get(url, {
+    headers: {
+      'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
+      ...(cookie ? { Cookie: cookie } : {}),
+    },
+    timeout: 15000,
+  });
+  return parseSubmissionList(html);
+}
+
+function parseSubmissionList(html: string): SubmissionSummary[] {
+  const $ = cheerio.load(html);
+  const list: SubmissionSummary[] = [];
+  $('#solutions-tbody > tr').each((_, tr) => {
+    const tds = $(tr).find('td');
+    if (tds.length < 9) return;
+    const idText = tds.eq(0).text().trim();
+    const id = parseInt(idText, 10);
+    if (!id) return;
+    list.push({
+      id,
+      userDisplay: tds.eq(1).find('a').first().text().trim() || tds.eq(1).text().trim(),
+      problemTitle: tds.eq(2).text().trim(),
+      score: tds.eq(3).text().trim(),
+      time: tds.eq(4).text().trim(),
+      memory: tds.eq(5).text().trim(),
+      language: tds.eq(6).text().trim(),
+      length: tds.eq(7).text().trim(),
+      submitTime: tds.eq(8).text().trim(),
+    });
+  });
+  return list;
+}
+
+/** 抓某个提交详情 */
+export async function fetchSolution(
+  id: number,
+  cookie?: string
+): Promise<SolutionDetail> {
+  const url = `${BASE_URL}/solutions/${id}`;
+  const { data: html } = await axios.get(url, {
+    headers: {
+      'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
+      ...(cookie ? { Cookie: cookie } : {}),
+    },
+    timeout: 15000,
+  });
+  return parseSolutionDetail(id, html);
+}
+
+function parseSolutionDetail(id: number, html: string): SolutionDetail {
+  const $ = cheerio.load(html);
+
+  const info: Record<string, string> = {};
+  // 第一张表：th/td 成对
+  $('table.table').first().find('tr').each((_, tr) => {
+    const ths = $(tr).find('th');
+    const tds = $(tr).find('td');
+    ths.each((i, th) => {
+      const key = $(th).text().trim();
+      const val = tds.eq(i).text().trim();
+      if (key && val) info[key] = val;
+    });
+  });
+
+  const problemAnchor = $('table.table').first().find('a[href^="/s/"]').first();
+  const problemUrl = problemAnchor.attr('href') ?? '';
+  const problemTitle = problemAnchor.text().trim() || info['题目'] || '';
+
+  const testcases: SolutionDetail['testcases'] = [];
+  // 第二张表：测试点
+  $('table.table').eq(1).find('tbody tr').each((_, tr) => {
+    const tds = $(tr).find('td');
+    if (tds.length < 5) return;
+    testcases.push({
+      id: tds.eq(0).text().trim(),
+      score: tds.eq(1).text().trim(),
+      time: tds.eq(2).text().trim(),
+      memory: tds.eq(3).text().trim(),
+      verdict: tds.eq(4).text().trim(),
+    });
+  });
+
+  const codeEl = $('pre.line-numbers code').first();
+  const code = codeEl.text();
+  const codeClass = codeEl.attr('class') ?? '';
+  const codeLanguage = codeClass.replace('language-', '').trim();
+
+  const status = info['状态'] ?? '';
+  const isFinished = status.includes('评测完成') || status.includes('编译错误');
+
+  return {
+    id,
+    userDisplay: info['用户'] ?? '',
+    problemTitle,
+    problemUrl,
+    score: info['分数'] ?? '',
+    time: info['耗时'] ?? '',
+    memory: info['内存'] ?? '',
+    language: info['语言'] ?? '',
+    length: info['长度'] ?? '',
+    status,
+    submitTime: info['提交时间'] ?? '',
+    judgeTime: info['评测时间'] ?? '',
+    testcases,
+    code,
+    codeLanguage,
+    isFinished,
+  };
+}
+
+// ============ 比赛相关 ============
+
+export interface ContestSummary {
+  id: string;
+  title: string;
+  type: string;
+  startTime: string;
+  endTime: string;
+  tag: string;
+  isRunning: boolean;
+}
+
+export async function fetchContests(
+  cookie?: string
+): Promise<ContestSummary[]> {
+  const url = `${BASE_URL}/contests`;
+  const { data: html } = await axios.get(url, {
+    headers: {
+      'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
+      ...(cookie ? { Cookie: cookie } : {}),
+    },
+    timeout: 15000,
+  });
+  return parseContests(html);
+}
+
+function parseContests(html: string): ContestSummary[] {
+  const $ = cheerio.load(html);
+  const list: ContestSummary[] = [];
+  $('#contests-table tbody tr').each((_, tr) => {
+    const tds = $(tr).find('td');
+    if (tds.length < 6) return;
+    const id = tds.eq(0).text().trim();
+    const title = tds.eq(1).find('a').first().text().trim();
+    const type = tds.eq(2).text().trim();
+    const startTime = tds.eq(3).text().trim();
+    const endTime = tds.eq(4).text().trim();
+    const tag = tds.eq(5).text().trim();
+    // 根据开始/结束时间判断是否进行中（本地时间粗略判断）
+    const now = Date.now();
+    const start = Date.parse(startTime.replace(/-/g, '/'));
+    const end = Date.parse(endTime.replace(/-/g, '/'));
+    const isRunning = !isNaN(start) && !isNaN(end) && now >= start && now <= end;
+    list.push({ id, title, type, startTime, endTime, tag, isRunning });
+  });
+  return list;
+}
+
+// ============ 用户信息 ============
+
+/** 从已登录的首页解析当前用户名 */
+export async function fetchCurrentUsername(
+  cookie: string
+): Promise<string | undefined> {
+  const { data: html } = await axios.get(`${BASE_URL}/`, {
+    headers: {
+      'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
+      Cookie: cookie,
+    },
+    timeout: 15000,
+  });
+  const $ = cheerio.load(html);
+  // 找 <a class="dropdown-item" href="/users/xxx"> 用户名 </a>
+  let username: string | undefined;
+  $('a.dropdown-item[href^="/users/"]').each((_, el) => {
+    const text = $(el).text().trim();
+    if (text && !username) username = text;
+  });
+  return username;
+}
+
+/** 翻页抓取自己所有提交记录 */
+export async function fetchAllMySubmissions(
+  username: string,
+  cookie?: string,
+  onProgress?: (page: number, count: number) => void,
+  stopAtId?: number
+): Promise<SubmissionSummary[]> {
+  const all: SubmissionSummary[] = [];
+  const seen = new Set<number>();
+
+  const params = new URLSearchParams();
+  params.append('user_name', username);
+
+  let url: string | undefined = `${BASE_URL}/solutions?${params.toString()}`;
+  let page = 0;
+  let reachedOld = false;
+
+  console.log(
+    '[fetchAllMySubmissions] 开始，cookie=' + (cookie ? '有' : '无')
+  );
+
+  const UA =
+    'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36';
+
+  // 检测是否是 WZOI 的 EO_Bot_Ssid 反爬页
+  const isBotPage = (html: string): boolean => {
+    return (
+      (html.length < 3000 && html.includes('EO_Bot_Ssid')) ||
+      html.includes('_0x649a') ||
+      (html.length < 3000 && html.includes('_0x'))
+    );
+  };
+
+  let consecutiveBotPages = 0;
+
+  while (url && page < 200) {
+    page++;
+
+    // 拉取当前页，最多重试 5 次（每次遇到 bot 页就等，等到了继续）
+    let html = '';
+    let success = false;
+    for (let attempt = 0; attempt < 5; attempt++) {
+      try {
+        const resp = await axios.get(url, {
+          headers: {
+            'User-Agent': UA,
+            Accept:
+              'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',
+            'Accept-Language': 'zh-CN,zh;q=0.9,en;q=0.8',
+            ...(cookie ? { Cookie: cookie } : {}),
+          },
+          timeout: 15000,
+        });
+        const body: string = resp.data;
+
+        if (isBotPage(body)) {
+          const waitMs = 3000 * (attempt + 1); // 3s, 6s, 9s, 12s, 15s
+          console.warn(
+            `[fetchAllMySubmissions] 第 ${page} 页第 ${attempt + 1}/5 次遇到 WAF 反爬页（${body.length} 字节），等 ${waitMs}ms 重试...`
+          );
+          await new Promise((r) => setTimeout(r, waitMs));
+          continue;
+        }
+
+        html = body;
+        success = true;
+        break;
+      } catch (e: any) {
+        const status = e && e.response ? e.response.status : '(网络错误)';
+        console.warn(
+          `[fetchAllMySubmissions] 第 ${page} 页第 ${attempt + 1}/5 次失败: ${status}，等 3s 重试...`
+        );
+        await new Promise((r) => setTimeout(r, 3000));
+      }
+    }
+
+    if (!success) {
+      console.error(
+        `[fetchAllMySubmissions] 第 ${page} 页 5 次都失败，跳过这页继续。累计 ${all.length} 条`
+      );
+      consecutiveBotPages++;
+      if (consecutiveBotPages >= 3) {
+        console.error(
+          `[fetchAllMySubmissions] 连续 3 页失败，可能被 WAF 长时间封了，终止`
+        );
+        break;
+      }
+      // 跳过这页：尝试从当前 HTML 里拿 next，拿不到就终止
+      // 由于没有成功拿到 html，这里只能终止
+      // （或者向前走无法推进，只能 break）
+      break;
+    }
+    consecutiveBotPages = 0;
+
+    const $ = cheerio.load(html);
+
+    const isLoginPage =
+      html.includes('/auth/login') && !html.includes('solutions-tbody');
+    if (isLoginPage) {
+      console.error(
+        `[fetchAllMySubmissions] 第 ${page} 页返回登录页，Cookie 可能失效，终止`
+      );
+      break;
+    }
+
+    let rowCount = 0;
+    $('#solutions-tbody > tr').each((_, tr) => {
+      const tds = $(tr).find('td');
+      if (tds.length < 9) return;
+      const id = parseInt(tds.eq(0).text().trim(), 10);
+      if (!id || seen.has(id)) return;
+      if (stopAtId && stopAtId > 0 && id <= stopAtId) {
+        reachedOld = true;
+        return;
+      }
+      seen.add(id);
+      all.push({
+        id,
+        userDisplay:
+          tds.eq(1).find('a').first().text().trim() ||
+          tds.eq(1).text().trim(),
+        problemTitle: tds.eq(2).text().trim(),
+        score: tds.eq(3).text().trim(),
+        time: tds.eq(4).text().trim(),
+        memory: tds.eq(5).text().trim(),
+        language: tds.eq(6).text().trim(),
+        length: tds.eq(7).text().trim(),
+        submitTime: tds.eq(8).text().trim(),
+      });
+      rowCount++;
+    });
+
+    if (page <= 3 || page % 10 === 0) {
+      console.log(
+        `[fetchAllMySubmissions] 第 ${page} 页: ${rowCount} 行, 累计 ${all.length}`
+      );
+    }
+
+    if (rowCount === 0) {
+      console.log(
+        `[fetchAllMySubmissions] 第 ${page} 页 0 行，终止`
+      );
+      break;
+    }
+
+    if (reachedOld) {
+      console.log('[fetchAllMySubmissions] 遇到本地已有的提交，增量同步结束');
+      break;
+    }
+
+    onProgress?.(page, all.length);
+
+    const next = $('a[rel="next"]').attr('href');
+    if (!next) {
+      console.log(
+        `[fetchAllMySubmissions] 第 ${page} 页无 rel="next"，终止。累计 ${all.length}`
+      );
+      break;
+    }
+    url = next.startsWith('http') ? next : `${BASE_URL}${next}`;
+
+    // 页间隔拉长到 800ms，减少 WAF 触发概率
+    await new Promise((r) => setTimeout(r, 800));
+  }
+
+  console.log(
+    `[fetchAllMySubmissions] 完成，共 ${all.length} 条，${page} 页`
+  );
+  return all;
+}
+
+/** 从提交列表构建「题目名 → 最高分」映射 */
+function normalizeTitle(s: string): string {
+  return s
+    .replace(/\u00a0/g, ' ')      // 不间断空格
+    .replace(/\u3000/g, ' ')      // 全角空格
+    .replace(/[\u200b-\u200f]/g, '') // 零宽字符
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+export function buildScoreIndex(
+  subs: SubmissionSummary[]
+): Map<string, number> {
+  const map = new Map<string, number>();
+  for (const s of subs) {
+    const score = parseFloat(s.score);
+    if (isNaN(score)) continue;
+    const key = normalizeTitle(s.problemTitle);
+    const prev = map.get(key) ?? -1;
+    if (score > prev) map.set(key, score);
+  }
+  return map;
+}
+
+export { normalizeTitle };
+export interface DashboardData {
+  homeworks: { title: string; url: string; current: number; total: number }[];
+  history: {
+    title: string;
+    url: string;
+    problemsetTitle: string;
+    problemsetUrl: string;
+    ac: boolean;
+  }[];
+  contests: { title: string; url: string; startTime: string; endTime: string }[];
+}
+
+export async function fetchDashboard(cookie?: string): Promise<DashboardData> {
+  const { data: html } = await axios.get(`${BASE_URL}/`, {
+    headers: {
+      'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
+      ...(cookie ? { Cookie: cookie } : {}),
+    },
+    timeout: 15000,
+  });
+  const $ = cheerio.load(html);
+
+  const homeworks: DashboardData['homeworks'] = [];
+  const history: DashboardData['history'] = [];
+  const contests: DashboardData['contests'] = [];
+
+  $('.card').each((_, card) => {
+    const header = $(card).find('.card-header').first().text().trim();
+
+    if (header === '作业') {
+      $(card).find('.list-group-item').each((_, li) => {
+        const a = $(li).find('a').first();
+        const title = a.text().trim();
+        const url = a.attr('href') ?? '';
+        const txt = $(li).find('.progress-bar').text().trim();
+        const m = txt.match(/(\d+)\s*\/\s*(\d+)/);
+        if (title) {
+          homeworks.push({
+            title,
+            url,
+            current: m ? parseInt(m[1], 10) : 0,
+            total: m ? parseInt(m[2], 10) : 0,
+          });
+        }
+      });
+    }
+
+    if (header === '浏览历史') {
+      $(card).find('.list-group-item').each((_, li) => {
+        const mainA = $(li).find('.col-10 a').first();
+        const psA = $(li).find('.col-10 small a').first();
+        const title = mainA.text().trim();
+        const url = mainA.attr('href') ?? '';
+        if (title) {
+          history.push({
+            title,
+            url,
+            problemsetTitle: psA.text().trim(),
+            problemsetUrl: psA.attr('href') ?? '',
+            ac: $(li).find('span.fa-check').length > 0,
+          });
+        }
+      });
+    }
+
+    if (header === '近期比赛') {
+      $(card).find('.list-group-item').each((_, li) => {
+        const a = $(li).find('a').first();
+        const title = a.text().trim();
+        const url = a.attr('href') ?? '';
+        const spans = $(li).find('span');
+        if (title) {
+          contests.push({
+            title,
+            url,
+            startTime: spans.eq(0).text().trim(),
+            endTime: spans.eq(1).text().trim(),
+          });
+        }
+      });
+    }
+  });
+
+  return { homeworks, history, contests };
+}
+export interface TagInfo {
+  id: string;
+  name: string;
+}
+
+export async function fetchTags(): Promise<TagInfo[]> {
+  const { data: html } = await axios.get(`${BASE_URL}/`, {
+    headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36' },
+    timeout: 15000,
+  });
+  const $ = cheerio.load(html);
+  const tags: TagInfo[] = [];
+  $('#tags-select option').each((_, el) => {
+    const id = $(el).attr('value') ?? '';
+    const name = $(el).text().trim();
+    if (id && name) tags.push({ id, name });
+  });
+  return tags;
+}
+
+export async function searchByTag(
+  tagId: string,
+  cookie?: string,
+  onProgress?: (page: number, total: number) => void
+): Promise<ProblemSummary[]> {
+  return searchProblems('', [tagId], cookie, onProgress);
+}
+/**
+ * 轮询等待评测完成
+ */
+export async function waitForSolution(
+  id: number,
+  cookie: string | undefined,
+  opts?: {
+    intervalMs?: number;
+    timeoutMs?: number;
+    onProgress?: (status: string) => void;
+    shouldCancel?: () => boolean;
+  }
+): Promise<SolutionDetail> {
+  const intervalMs = opts?.intervalMs ?? 1500;
+  const timeoutMs = opts?.timeoutMs ?? 90000;
+  const start = Date.now();
+  let last: SolutionDetail | undefined;
+
+  while (Date.now() - start < timeoutMs) {
+    if (opts?.shouldCancel?.()) {
+      throw new Error('已取消');
+    }
+    try {
+      last = await fetchSolution(id, cookie);
+      opts?.onProgress?.(last.status || '评测中...');
+      if (last.isFinished) return last;
+    } catch (err) {
+      // 网络抖动忽略，继续轮询
+      console.error('轮询提交状态失败:', err);
+    }
+    await new Promise((r) => setTimeout(r, intervalMs));
+  }
+  if (last) return last;
+  throw new Error('等待评测结果超时');
+}
+export interface UserSummary {
+  uid: string;
+  username: string;
+  nickname: string;
+  avatar: string;
+}
+
+/**
+ * 通用题目搜索：关键词和标签 ID 均可选，但不能都为空。
+ * 会拉取所有分页。
+ */
+export async function searchProblems(
+  keyword: string,
+  tagIds: string[],
+  cookie?: string,
+  onProgress?: (page: number, total: number) => void
+): Promise<ProblemSummary[]> {
+  const all: ProblemSummary[] = [];
+  const seen = new Set<string>();
+  let page = 1;
+  let totalPages = 1;
+
+  while (page <= totalPages) {
+    const params = new URLSearchParams();
+    params.append('name', keyword);
+    for (const t of tagIds) params.append('tags[]', t);
+    params.append('search_item', 'problems');
+    params.append('page', String(page));
+    const url = `${BASE_URL}/search?${params.toString()}`;
+
+    const { data: html } = await axios.get(url, {
+      headers: {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
+        ...(cookie ? { Cookie: cookie } : {}),
+      },
+      timeout: 15000,
+    });
+
+    const $ = cheerio.load(html);
+
+    $('table.table tbody tr').each((_, tr) => {
+      const tds = $(tr).find('td');
+      if (tds.length < 3) return;
+
+      const problemsetTitle = tds.eq(0).text().trim();
+      const a = tds.eq(1).find('a[href^="/s/"]').first();
+      if (!a.length) return;
+      const href = a.attr('href') ?? '';
+      const m = href.match(/^\/s\/(\d+)\/(\d+)/);
+      if (!m) return;
+      const key = `${m[1]}/${m[2]}`;
+      if (seen.has(key)) return;
+      seen.add(key);
+
+      all.push({
+        problemsetId: m[1],
+        problemId: m[2],
+        title: a.text().trim(),
+        problemsetTitle,
+      });
+    });
+
+    if (page === 1) {
+      $('.pagination .page-link').each((_, el) => {
+        const href = $(el).attr('href') ?? '';
+        const m = href.match(/[?&]page=(\d+)/);
+        if (m) {
+          const n = parseInt(m[1], 10);
+          if (n > totalPages) totalPages = n;
+        }
+      });
+    }
+
+    onProgress?.(page, totalPages);
+    page++;
+    if (page <= totalPages) await new Promise((r) => setTimeout(r, 200));
+  }
+
+  return all;
+}
+
+/**
+ * 搜索用户
+ */
+export async function searchUsers(
+  keyword: string,
+  cookie?: string
+): Promise<UserSummary[]> {
+  const params = new URLSearchParams();
+  params.append('name', keyword);
+  params.append('search_item', 'users');
+  const url = `${BASE_URL}/search?${params.toString()}`;
+
+  const { data: html } = await axios.get(url, {
+    headers: {
+      'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
+      ...(cookie ? { Cookie: cookie } : {}),
+    },
+    timeout: 15000,
+  });
+
+  const $ = cheerio.load(html);
+  const all: UserSummary[] = [];
+  const seen = new Set<string>();
+
+  // 每个用户是一个 .card，内含头像链接和 <h6> 用户名
+  $('.card').each((_, card) => {
+    const a = $(card).find('a[href^="/users/"]').first();
+    if (!a.length) return;
+    const href = a.attr('href') ?? '';
+    const m = href.match(/^\/users\/(\d+)/);
+    if (!m) return;
+    const uid = m[1];
+    if (seen.has(uid)) return;
+    seen.add(uid);
+
+    const img = $(card).find('img.card-img').first();
+    const avatar = img.attr('src') || '';
+
+    const nameEl = $(card).find('h6').first();
+    const displayName = nameEl.text().trim();
+
+    all.push({
+      uid,
+      username: displayName,
+      nickname: displayName,
+      avatar,
+    });
+  });
+
+  return all;
+}
+
+export interface UserProfile {
+  uid: string;
+  displayName: string;
+  mainHtml: string;
+}
+
+async function fetchImageAsDataUri(
+  url: string,
+  cookie?: string
+): Promise<string> {
+  if (!url) return '';
+  try {
+    let full = url;
+    if (url.startsWith('//')) {
+      full = `https:${url}`;
+    } else if (url.startsWith('/')) {
+      full = `https://wzoi.cn${url}`;
+    } else if (url.startsWith('../')) {
+      // WZOI 常用 ../../files/... 形式，对应 https://wzoi.cn/files/...
+      full = 'https://wzoi.cn/' + url.replace(/^(\.\.\/)+/, '');
+    } else if (!/^https?:/i.test(url)) {
+      full = `https://wzoi.cn/${url}`;
+    }
+    const resp = await axios.get(full, {
+      headers: {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
+        'Referer': 'https://wzoi.cn/',
+        ...(cookie ? { Cookie: cookie } : {}),
+      },
+      responseType: 'arraybuffer',
+      timeout: 10000,
+    });
+    const mime = String(resp.headers['content-type'] || 'image/png');
+    const b64 = Buffer.from(resp.data).toString('base64');
+    return `data:${mime};base64,${b64}`;
+  } catch (err: any) {
+    return '';
+  }
+}
+
+export async function fetchUserProfile(
+  uid: string,
+  cookie?: string
+): Promise<UserProfile> {
+  const url = `${BASE_URL}/users/${uid}`;
+  const { data: html } = await axios.get(url, {
+    headers: {
+      'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
+      ...(cookie ? { Cookie: cookie } : {}),
+    },
+    timeout: 15000,
+  });
+  const $ = cheerio.load(html);
+
+  const displayName =
+    $('main .card-title').first().text().trim() ||
+    $('main h1').first().text().trim() ||
+    `用户 ${uid}`;
+
+  const mainEl = $('main').clone();
+
+  // 剔除无关内容
+  mainEl.find('script, style, link').remove();
+  mainEl.find('.breadcrumb').remove();
+  mainEl.find('.modal').remove();
+  mainEl.find('#image_upload').remove();
+  mainEl.find('button[data-toggle="modal"]').remove();
+  mainEl.find('button[data-target]').remove();
+  mainEl.find('button[onclick]').remove();
+  mainEl.find('a[href="/password/change"]').remove();
+  mainEl.find('.btn').remove();
+
+  // 特殊处理：提交数 / 通过题目 链接
+  mainEl.find('a[href^="/solutions?user_name="]').each((_, el) => {
+    const $el = $(el);
+    const href = $el.attr('href') || '';
+    const match = href.match(/user_name=([^&]+)/);
+    const userName = match ? decodeURIComponent(match[1]) : '';
+    const isAc = href.includes('score_min=100');
+    $el.attr('data-wzoi-action', 'openSubmissions');
+    $el.attr('data-wzoi-user', userName);
+    $el.attr('data-wzoi-filter', isAc ? 'ac' : 'all');
+    $el.removeAttr('href');
+    $el.attr('href', '#');
+  });
+
+  // 内联图片（带 Cookie 下载 → base64）
+  const imgEls = mainEl.find('img').toArray();
+  for (const el of imgEls) {
+    const $el = $(el);
+    const src = $el.attr('src') || '';
+    if (!src) continue;
+    const dataUri = await fetchImageAsDataUri(src, cookie);
+    if (dataUri) {
+      $el.attr('src', dataUri);
+    } else {
+      $el.remove();
+    }
+  }
+
+  // 其余相对链接改绝对路径
+  mainEl.find('a[href]').each((_, el) => {
+    const $el = $(el);
+    const href = $el.attr('href') || '';
+    // 已经特殊处理过的跳过
+    if ($el.attr('data-wzoi-action')) return;
+    if (href.startsWith('/')) {
+      $el.attr('href', `https://wzoi.cn${href}`);
+    }
+  });
+
+  return {
+    uid,
+    displayName,
+    mainHtml: mainEl.html() || '',
+  };
+}
+
+export interface SubmissionListItem {
+  id: number;
+  userDisplay: string;
+  problemTitle: string;
+  score: string;
+  time: string;
+  memory: string;
+  language: string;
+  length: string;
+  submitTime: string;
+}
+
+/**
+ * 抓取某用户的提交列表（支持 AC 筛选），自动翻页
+ */
+export interface SubmissionFilters {
+  userName?: string;
+  problemsetId?: string;
+  problemId?: string;
+  scoreMin?: string;
+  scoreMax?: string;
+  language?: string;
+  status?: string;
+}
+
+export async function fetchUserSubmissions(
+  filters: SubmissionFilters,
+  cookie?: string,
+  onProgress?: (page: number, count: number) => void
+): Promise<SubmissionListItem[]> {
+  const all: SubmissionListItem[] = [];
+  const seen = new Set<number>();
+
+  const params = new URLSearchParams();
+  if (filters.userName) params.append('user_name', filters.userName);
+  if (filters.problemsetId) params.append('problemset_id', filters.problemsetId);
+  if (filters.problemId) params.append('problem_id', filters.problemId);
+  if (filters.scoreMin !== undefined) params.append('score_min', filters.scoreMin);
+  if (filters.scoreMax !== undefined) params.append('score_max', filters.scoreMax);
+  if (filters.language) params.append('language', filters.language);
+  if (filters.status) params.append('status', filters.status);
+
+  let url: string | undefined = `${BASE_URL}/solutions?${params.toString()}`;
+  let page = 0;
+
+  while (url && page < 100) {
+    page++;
+    const { data: html } = await axios.get(url, {
+      headers: {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
+        ...(cookie ? { Cookie: cookie } : {}),
+      },
+      timeout: 15000,
+    });
+
+    const $ = cheerio.load(html);
+
+    $('#solutions-tbody > tr').each((_, tr) => {
+      const tds = $(tr).find('td');
+      if (tds.length < 9) return;
+
+      const id = parseInt(tds.eq(0).text().trim(), 10);
+      if (!id || seen.has(id)) return;
+      seen.add(id);
+
+      all.push({
+        id,
+        userDisplay:
+          tds.eq(1).find('a').first().text().trim() ||
+          tds.eq(1).text().trim(),
+        problemTitle: tds.eq(2).text().trim(),
+        score: tds.eq(3).text().trim(),
+        time: tds.eq(4).text().trim(),
+        memory: tds.eq(5).text().trim(),
+        language: tds.eq(6).text().trim(),
+        length: tds.eq(7).text().trim(),
+        submitTime: tds.eq(8).text().trim(),
+      });
+    });
+
+    onProgress?.(page, all.length);
+
+    // cursor 分页
+    const next = $('a[rel="next"]').attr('href');
+    if (!next) break;
+    url = next.startsWith('http') ? next : `${BASE_URL}${next}`;
+
+    await new Promise((r) => setTimeout(r, 200));
+  }
+
+  return all;
+}
+
+export interface RanklistProblem {
+  id: string;
+  title: string;
+  index: number;
+}
+
+export interface RanklistRow {
+  rank: string;
+  uid: string;
+  username: string;
+  nickname: string;
+  display: string;
+  scores: string[];
+  total: string;
+}
+
+export interface Ranklist {
+  problemsetId: string;
+  title: string;
+  problems: RanklistProblem[];
+  rows: RanklistRow[];
+}
+
+export async function fetchRanklist(
+  problemsetId: string,
+  cookie?: string
+): Promise<Ranklist> {
+  const url = `${BASE_URL}/s/${problemsetId}/ranklist`;
+  const { data: html } = await axios.get(url, {
+    headers: {
+      'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
+      ...(cookie ? { Cookie: cookie } : {}),
+    },
+    timeout: 15000,
+  });
+  const $ = cheerio.load(html);
+
+  // 比赛标题
+  let title = `比赛 ${problemsetId}`;
+  $('ol.breadcrumb a[href^="/s/"]').each((_, el) => {
+    const href = $(el).attr('href') || '';
+    if (href === `/s/${problemsetId}`) {
+      title = $(el).text().trim() || title;
+    }
+  });
+
+  // 题目列表（表头里每个题目的链接）
+  const problems: RanklistProblem[] = [];
+  $('#ranklist-table thead th a[href^="/s/"]').each((i, el) => {
+    const href = $(el).attr('href') || '';
+    const m = href.match(/^\/s\/\d+\/(\d+)/);
+    if (!m) return;
+    problems.push({
+      id: m[1],
+      title: $(el).attr('title') || $(el).text().trim() || `题目 ${i + 1}`,
+      index: i + 1,
+    });
+  });
+
+  const problemCount = problems.length;
+
+  // 每行用户
+  const rows: RanklistRow[] = [];
+  $('#ranklist-table tbody tr').each((_, tr) => {
+    const tds = $(tr).find('td');
+    if (tds.length < 2 + problemCount + 2) return;
+
+    const userA = tds.eq(1).find('a.user-badge, a[href^="/users/"]').first();
+    if (!userA.length) return;
+
+    const display = userA.text().trim();
+    const uid = userA.attr('data-uid') || '';
+    const username = userA.attr('data-uname') || '';
+    const nickname = userA.attr('data-nickname') || display;
+
+    const scores: string[] = [];
+    for (let i = 0; i < problemCount; i++) {
+      scores.push(tds.eq(2 + i).text().trim());
+    }
+
+    const total = tds.eq(2 + problemCount).text().trim();
+    const rank = tds.eq(3 + problemCount).text().trim();
+
+    rows.push({ rank, uid, username, nickname, display, scores, total });
+  });
+
+  return { problemsetId, title, problems, rows };
+}
+
+export interface ProblemsetSummary {
+  id: string;
+  title: string;
+}
+
+export async function fetchAllProblemsets(
+  cookie?: string
+): Promise<ProblemsetSummary[]> {
+  const { data: html } = await axios.get(`${BASE_URL}/s`, {
+    headers: {
+      'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
+      ...(cookie ? { Cookie: cookie } : {}),
+    },
+    timeout: 15000,
+  });
+  const $ = cheerio.load(html);
+  const list: ProblemsetSummary[] = [];
+  const seen = new Set<string>();
+  $('a[href]').each((_, el) => {
+    const href = $(el).attr('href') ?? '';
+    const m = href.match(/^\/s\/(\d+)\/?$/);
+    if (!m) return;
+    const id = m[1];
+    if (seen.has(id)) return;
+    const title = $(el).text().trim();
+    if (!title || /^\d+$/.test(title) || title.length < 2) return;
+    seen.add(id);
+    list.push({ id, title });
+  });
+  return list;
+}
+
+
+export interface ProblemStats {
+  submitCount?: number;
+  passRate?: string;
+  avgScore?: string;
+}
+
+export async function fetchProblemStats(
+  problemsetId: string,
+  problemId: string,
+  cookie?: string
+): Promise<ProblemStats> {
+  const url = `${BASE_URL}/s/${problemsetId}/${problemId}`;
+  const { data: html } = await axios.get(url, {
+    headers: {
+      'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
+      ...(cookie ? { Cookie: cookie } : {}),
+    },
+    timeout: 15000,
+  });
+  const $ = cheerio.load(html);
+  const small = $('.w-100.text-center small').first().text().trim();
+  if (!small) return {};
+  const submit = small.match(/提交数:\s*(\d+)/);
+  const rate = small.match(/通过率:\s*([\d.]+%)/);
+  const avg = small.match(/平均分:\s*([\d.]+)/);
+  return {
+    submitCount: submit ? parseInt(submit[1], 10) : undefined,
+    passRate: rate ? rate[1] : undefined,
+    avgScore: avg ? avg[1] : undefined,
+  };
+}
+
+
+/**
+ * 用题目名搜索，从结果里匹配目标 pid，取它的标签（精确反查）
+ */
+export async function searchTagsByPid(
+  title: string,
+  targetPid: string,
+  cookie?: string
+): Promise<{ id: string; name: string }[]> {
+  const params = new URLSearchParams();
+  params.append('name', title);
+  params.append('search_item', 'problems');
+  const url = `${BASE_URL}/search?${params.toString()}`;
+
+  const { data: html } = await axios.get(url, {
+    headers: {
+      'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
+      ...(cookie ? { Cookie: cookie } : {}),
+    },
+    timeout: 15000,
+  });
+
+  const $ = cheerio.load(html);
+  const matched: { id: string; name: string }[] = [];
+
+  $('table.table tbody tr').each((_, tr) => {
+    const tds = $(tr).find('td');
+    if (tds.length < 2) return;
+
+    const a = tds.eq(1).find('a[href^="/s/"]').first();
+    if (!a.length) return;
+    const href = a.attr('href') ?? '';
+    const m = href.match(/^\/s\/(\d+)\/(\d+)/);
+    if (!m) return;
+    if (m[2] !== targetPid) return;
+
+    tds.eq(1).find('a.openpop').each((_, tagEl) => {
+      const tagHref = $(tagEl).attr('href') ?? '';
+      const tagMatch = tagHref.match(/#tag-(\d+)/);
+      const tagName = $(tagEl).text().trim();
+      if (tagMatch && tagName && !matched.find((x) => x.id === tagMatch[1])) {
+        matched.push({ id: tagMatch[1], name: tagName });
+      }
+    });
+  });
+
+  return matched;
+}
+
+
+/**
+ * 降级方案：从提交记录页统计某题的提交数和通过率。
+ * 用于比赛题目（详情页没有 <small> 展示统计）。
+ */
+export async function computeStatsFromSubmissions(
+  problemsetId: string,
+  problemId: string,
+  cookie?: string
+): Promise<ProblemStats> {
+  const params = new URLSearchParams();
+  params.append('problemset_id', problemsetId);
+  params.append('problem_id', problemId);
+
+  let url: string | undefined = `${BASE_URL}/solutions?${params.toString()}`;
+  let page = 0;
+  let total = 0;
+  let acCount = 0;
+  const MAX_PAGES = 50; // 1000 条上限，防止极端刷题者
+
+  const UA =
+    'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36';
+
+  const isBotPage = (html: string) =>
+    html.length < 3000 && (html.includes('EO_Bot_Ssid') || html.includes('_0x'));
+
+  while (url && page < MAX_PAGES) {
+    page++;
+
+    let html = '';
+    let success = false;
+    for (let attempt = 0; attempt < 3; attempt++) {
+      try {
+        const resp = await axios.get(url, {
+          headers: {
+            'User-Agent': UA,
+            'Accept-Language': 'zh-CN,zh;q=0.9',
+            ...(cookie ? { Cookie: cookie } : {}),
+          },
+          timeout: 15000,
+        });
+        if (isBotPage(resp.data)) {
+          await new Promise((r) => setTimeout(r, 3000 * (attempt + 1)));
+          continue;
+        }
+        html = resp.data;
+        success = true;
+        break;
+      } catch {
+        await new Promise((r) => setTimeout(r, 2000));
+      }
+    }
+
+    if (!success) break;
+
+    const $ = cheerio.load(html);
+    const rows = $('#solutions-tbody > tr');
+    if (rows.length === 0) break;
+
+    rows.each((_, tr) => {
+      const tds = $(tr).find('td');
+      if (tds.length < 9) return;
+      total++;
+      const score = parseFloat(tds.eq(3).text().trim());
+      if (!isNaN(score) && score >= 100) acCount++;
+    });
+
+    const next = $('a[rel="next"]').attr('href');
+    if (!next) break;
+    url = next.startsWith('http') ? next : `${BASE_URL}${next}`;
+
+    await new Promise((r) => setTimeout(r, 500));
+  }
+
+  if (total === 0) return {};
+
+  return {
+    submitCount: total,
+    passRate: `${((acCount / total) * 100).toFixed(2)}%`,
+  };
+}
+
+export interface DashboardStats {
+  totalProblems: number;
+  acProblems: number;
+  attemptedProblems: number;
+  unattemptedProblems: number;
+  passRate: number; // 0~100
+  byTag: { name: string; total: number; ac: number }[];
+  byProblemset: { id: string; title: string; total: number; ac: number }[];
+  recentDays: { date: string; count: number }[]; // 近 7 天
+}
+
+/**
+ * 根据题目索引和分数索引计算做题统计
+ */
+export function computeDashboardStats(
+  problems: {
+    pid: string;
+    title: string;
+    tags: { id: string; name: string }[];
+    problemsets: { id: string; title: string }[];
+  }[],
+  scoreIndex: Map<string, number>,
+  submissions?: { submitTime: string }[]
+): DashboardStats {
+  const norm = (s: string) =>
+    String(s)
+      .replace(/\u00a0/g, ' ')
+      .replace(/\u3000/g, ' ')
+      .replace(/[\u200b-\u200f]/g, '')
+      .replace(/\s+/g, ' ')
+      .trim();
+
+  let ac = 0;
+  let attempted = 0;
+
+  const tagMap = new Map<string, { total: number; ac: number }>();
+  const psMap = new Map<string, { title: string; total: number; ac: number }>();
+
+  for (const p of problems) {
+    const score = scoreIndex.get(norm(p.title));
+    const isAc = score !== undefined && score >= 100;
+    const isAttempted = score !== undefined;
+
+    if (isAc) ac++;
+    if (isAttempted) attempted++;
+
+    for (const t of p.tags || []) {
+      const e = tagMap.get(t.id) || { total: 0, ac: 0 };
+      e.total++;
+      if (isAc) e.ac++;
+      tagMap.set(t.id, e);
+    }
+    for (const ps of p.problemsets || []) {
+      const e = psMap.get(ps.id) || { title: ps.title, total: 0, ac: 0 };
+      e.total++;
+      if (isAc) e.ac++;
+      psMap.set(ps.id, e);
+    }
+  }
+
+  // 标签：按总题数降序，Top 20
+  const tagNames = new Map<string, string>();
+  for (const p of problems) {
+    for (const t of p.tags || []) tagNames.set(t.id, t.name);
+  }
+  const byTag = Array.from(tagMap.entries())
+    .map(([id, v]) => ({ name: tagNames.get(id) || id, ...v }))
+    .filter((x) => x.total > 0)
+    .sort((a, b) => b.total - a.total)
+    .slice(0, 20);
+
+  // 题库：按总题数降序
+  const byProblemset = Array.from(psMap.entries())
+    .map(([id, v]) => ({ id, ...v }))
+    .sort((a, b) => b.total - a.total);
+
+  // 近 7 天提交数
+  const recentDays: { date: string; count: number }[] = [];
+  if (submissions && submissions.length) {
+    const today = new Date();
+    today.setHours(0, 0, 0, 0);
+    const dayMap = new Map<string, number>();
+    for (const s of submissions) {
+      const d = s.submitTime.split(' ')[0]; // 'YYYY-MM-DD'
+      dayMap.set(d, (dayMap.get(d) || 0) + 1);
+    }
+    for (let i = 6; i >= 0; i--) {
+      const d = new Date(today.getTime() - i * 86400000);
+      const key = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+      recentDays.push({ date: key, count: dayMap.get(key) || 0 });
+    }
+  }
+
+  const totalProblems = problems.length;
+  const passRate = totalProblems > 0 ? (ac / totalProblems) * 100 : 0;
+
+  return {
+    totalProblems,
+    acProblems: ac,
+    attemptedProblems: attempted,
+    unattemptedProblems: totalProblems - attempted,
+    passRate,
+    byTag,
+    byProblemset,
+    recentDays,
+  };
+}

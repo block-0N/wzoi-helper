@@ -7,6 +7,7 @@ import {
 } from '../api/wzoi';
 
 const CACHE_DIR = 'wzoi-cache';
+const RESUME_URL_KEY = 'wzoi.submissionResumeUrl';
 
 function sanitize(name: string): string {
   return name.replace(/[<>:"/\\|?*\x00-\x1f]/g, '_');
@@ -83,6 +84,26 @@ export class SubmissionCache {
     return this.list.length > 0;
   }
 
+
+  getResumeUrl(): string | undefined {
+    return this.ctx.globalState.get<string>(RESUME_URL_KEY);
+  }
+
+  async setResumeUrl(url: string | undefined): Promise<void> {
+    await this.ctx.globalState.update(RESUME_URL_KEY, url || undefined);
+  }
+
+  private mergeById(
+    existing: SubmissionSummary[],
+    incoming: SubmissionSummary[]
+  ): SubmissionSummary[] {
+    const map = new Map<number, SubmissionSummary>();
+    for (const s of existing) map.set(s.id, s);
+    for (const s of incoming) map.set(s.id, s);
+    const merged = Array.from(map.values());
+    merged.sort((a, b) => b.id - a.id);
+    return merged;
+  }
   getMaxId(): number {
     return this.list.length > 0 ? this.list[0].id : 0;
   }
@@ -178,32 +199,60 @@ export class SubmissionCache {
     if (!username) throw new Error('未登录');
 
     const fromCache = this.list.length > 0;
-    const stopAtId = fromCache ? this.getMaxId() : 0;
 
+    // 1. 有遗留断点 → 优先补抓历史缺口
+    const savedResume = this.getResumeUrl();
+    if (savedResume) {
+      console.log(`[cache] 发现遗留断点，优先补抓: ${savedResume}`);
+      onProgress?.('补抓历史缺口...');
+      const history = await fetchAllMySubmissions(
+        username,
+        cookie,
+        (page, count) => onProgress?.(`补历史 第 ${page} 页 · 已加载 ${count} 条`),
+        undefined,
+        savedResume
+      );
+      const beforeCount = this.list.length;
+      this.list = this.mergeById(this.list, history.items);
+      await this.saveList();
+      if (history.completed) {
+        await this.setResumeUrl(undefined);
+        console.log(`[cache] 历史缺口补完，新增 ${this.list.length - beforeCount} 条`);
+      } else {
+        await this.setResumeUrl(history.resumeUrl);
+        console.log(`[cache] 历史缺口仍未补完，更新断点: ${history.resumeUrl}`);
+        return {
+          added: this.list.length - beforeCount,
+          total: this.list.length,
+          fromCache,
+        };
+      }
+    }
+
+    // 2. 正常增量同步
+    const stopAtId = this.list.length > 0 ? this.getMaxId() : 0;
     console.log(
-      `[cache] 开始同步：${fromCache ? `增量（stopAtId=${stopAtId}）` : '全量'}`
+      `[cache] 开始同步：${this.list.length > 0 ? `增量（stopAtId=${stopAtId}）` : '全量'}`
     );
 
-    const fetched = await fetchAllMySubmissions(
+    const fresh = await fetchAllMySubmissions(
       username,
       cookie,
-      (page, count) =>
-        onProgress?.(`第 ${page} 页 · 已加载 ${count} 条`),
+      (page, count) => onProgress?.(`第 ${page} 页 · 已加载 ${count} 条`),
       stopAtId
     );
 
-    const existingIds = new Set(this.list.map((s) => s.id));
-    const newOnes = fetched.filter((s) => !existingIds.has(s.id));
+    const beforeCount = this.list.length;
+    this.list = this.mergeById(this.list, fresh.items);
+    await this.saveList();
 
-    if (newOnes.length > 0) {
-      this.list = [...newOnes, ...this.list];
-      this.list.sort((a, b) => b.id - a.id);
-      await this.saveList();
+    if (!fresh.completed && fresh.resumeUrl) {
+      await this.setResumeUrl(fresh.resumeUrl);
+      console.log(`[cache] 增量同步中途失败，记录断点: ${fresh.resumeUrl}`);
     }
 
-    console.log(
-      `[cache] 同步完成：新增 ${newOnes.length} 条，总计 ${this.list.length} 条`
-    );
-    return { added: newOnes.length, total: this.list.length, fromCache };
+    const added = this.list.length - beforeCount;
+    console.log(`[cache] 同步完成：新增 ${added} 条，总计 ${this.list.length} 条`);
+    return { added, total: this.list.length, fromCache };
   }
 }

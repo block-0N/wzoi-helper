@@ -1,6 +1,6 @@
 import { ProblemListPanel } from './webview/problemListPanel';
 import { SubmissionCache } from './cache/submissionCache';
-import { getCachedIndex, buildIndex } from './indexer/problemIndexer';
+import { getCachedIndex, buildIndex, refreshProblemsetIndex } from './indexer/problemIndexer';
 import { fetchAllProblemsets } from './api/wzoi';
 import * as vscode from 'vscode';
 import {
@@ -95,6 +95,99 @@ export function activate(context: vscode.ExtensionContext) {
       } catch (err) {
         output.appendLine(`失败: ${err}`);
         vscode.window.showErrorMessage(`构建索引失败: ${err}`);
+      }
+    }
+  );
+  // ---------- 命令：刷新指定题库索引 ----------
+  const refreshProblemsetIndexCmd = vscode.commands.registerCommand(
+    'wzoi-helper.refreshProblemset',
+    async (arg?: { id: string; title?: string } | string) => {
+      const oldIndex = await getCachedIndex(context);
+      if (!oldIndex) {
+        const action = await vscode.window.showWarningMessage(
+          '题库索引尚未构建，是否现在构建全量索引？',
+          '构建索引',
+          '取消'
+        );
+        if (action === '构建索引') {
+          vscode.commands.executeCommand('wzoi-helper.buildProblemIndex');
+        }
+        return;
+      }
+
+      let psid: string | undefined;
+      let psTitle = '';
+      if (typeof arg === 'string') {
+        psid = arg;
+      } else if (arg && typeof arg === 'object' && arg.id) {
+        psid = arg.id;
+        psTitle = arg.title ?? '';
+      }
+
+      if (!psid) {
+        const cfg = vscode.workspace.getConfiguration('wzoi');
+        const configuredIds = cfg.get<string[]>('problemsets') ?? [];
+        const known = new Map<string, string>();
+        for (const rec of oldIndex.problems) {
+          for (const ps of rec.problemsets) {
+            if (!known.has(ps.id)) known.set(ps.id, ps.title);
+          }
+        }
+        const items = [
+          ...configuredIds.map((id) => ({
+            label: known.get(id) || '题库 ' + id,
+            description: '#' + id + ' (侧边栏已配置)',
+            id,
+          })),
+          ...Array.from(known.entries())
+            .filter(([id]) => !configuredIds.includes(id))
+            .map(([id, title]) => ({ label: title, description: '#' + id, id })),
+        ];
+        const pick = await vscode.window.showQuickPick(items, {
+          placeHolder: '选择要刷新的题库（仅该题库增量重建，不做全量）',
+          matchOnDescription: true,
+        });
+        if (!pick) return;
+        psid = pick.id;
+        psTitle = pick.label;
+      }
+
+      try {
+        const cookie = await getCookie();
+        const result = await vscode.window.withProgress(
+          {
+            location: vscode.ProgressLocation.Notification,
+            title: '刷新题库 ' + (psTitle || psid),
+            cancellable: true,
+          },
+          (progress, token) =>
+            refreshProblemsetIndex(context, psid!, cookie, progress, token)
+        );
+
+        const { added, updated, removed, total } = result.stats;
+        vscode.window.showInformationMessage(
+          '题库 ' + (psTitle || psid) + ' 刷新完成：新增 ' + added +
+            '，更新 ' + updated + '，移除 ' + removed + '，索引共 ' + total + ' 题'
+        );
+
+        if (ProblemListPanel.currentPanel) {
+          const scoreIndex = treeProvider.getScoreIndex();
+          const scoreArr = Array.from(scoreIndex.entries());
+          const scoreUri = vscode.Uri.joinPath(context.globalStorageUri, 'score-index.json');
+          await vscode.workspace.fs.writeFile(
+            scoreUri,
+            Buffer.from(JSON.stringify(scoreArr), 'utf8')
+          );
+          const dataUri = vscode.Uri.joinPath(context.globalStorageUri, 'problem-index.json');
+          ProblemListPanel.createOrShow(
+            context.extensionUri,
+            context.globalStorageUri,
+            dataUri,
+            scoreUri
+          );
+        }
+      } catch (err) {
+        vscode.window.showErrorMessage('刷新题库失败: ' + err);
       }
     }
   );
@@ -715,6 +808,53 @@ export function activate(context: vscode.ExtensionContext) {
     }
   };
 
+  // ---------- 命令：全量重抓提交记录 ----------
+  const forceFullSyncSubmissions = vscode.commands.registerCommand(
+    'wzoi-helper.forceFullSyncSubmissions',
+    async () => {
+      const cookie = await getCookie();
+      const username = await getUsername();
+      if (!cookie || !username) {
+        vscode.window.showWarningMessage('请先登录 WZOI');
+        return;
+      }
+      const confirm = await vscode.window.showWarningMessage(
+        '将清空本地提交缓存并从第 1 页开始完整重抓（约 2-5 分钟，可能触发 WAF 限流）。确定执行？',
+        '开始重抓',
+        '取消'
+      );
+      if (confirm !== '开始重抓') return;
+
+      try {
+        await submissionCache.setResumeUrl(undefined);
+        await submissionCache.clear();
+
+        const result = await vscode.window.withProgress(
+          {
+            location: vscode.ProgressLocation.Notification,
+            title: '全量重抓提交记录',
+            cancellable: false,
+          },
+          (progress) =>
+            submissionCache.sync(cookie, (msg) => progress.report({ message: msg }))
+        );
+
+        const resumeLeft = submissionCache.getResumeUrl();
+        if (resumeLeft) {
+          vscode.window.showWarningMessage(
+            `全量重抓中途被 WAF 拦截，已保存 ${result.total} 条并记录断点。稍后执行「同步提交记录」会从断点继续补抓。`
+          );
+        } else {
+          vscode.window.showInformationMessage(
+            `全量重抓完成：共 ${result.total} 条`
+          );
+        }
+        submissionProvider.refresh();
+      } catch (err) {
+        vscode.window.showErrorMessage(`全量重抓失败: ${err}`);
+      }
+    }
+  );
   const syncACStatus = vscode.commands.registerCommand(
     'wzoi-helper.syncACStatus',
     () => syncACStatusInternal(false)
