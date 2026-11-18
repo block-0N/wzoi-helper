@@ -2,7 +2,7 @@
   "name": "wzoi-helper",
   "displayName": "wzoi-helper",
   "description": "WZOI 题目辅助工具",
-  "version": "1.8.0",
+  "version": "1.8.5",
   "publisher": "block-0N",
   "repository": {
     "type": "git",
@@ -306,6 +306,23 @@
         "command": "wzoi-helper.search",
         "key": "ctrl+alt+f",
         "when": "editorTextFocus"
+      }
+    ],
+    "themes": [
+      {
+        "label": "Devcpp-Theme",
+        "uiTheme": "vs",
+        "path": "./themes/Devcpp-Theme-color-theme.json"
+      },
+      {
+        "label": "WZOI-Theme",
+        "uiTheme": "vs",
+        "path": "./themes/WZOI-Theme-color-theme.json"
+      },
+      {
+        "label": "Luogu-Theme",
+        "uiTheme": "vs",
+        "path": "./themes/Luogu-Theme-color-theme.json"
       }
     ]
   },
